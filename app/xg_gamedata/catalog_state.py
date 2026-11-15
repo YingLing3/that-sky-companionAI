@@ -21,6 +21,8 @@ import xg_paths
 import xg_exec
 
 REBUILD_MESSAGE = "目录需要用当前版本重新录制遇境后重建"
+QIANNIAOCHENG_STALE_CODE = "catalog_qianniaocheng_stale"
+QIANNIAOCHENG_REBUILD_MESSAGE = "千鸟城落点已更新，需要重新构建地图目录"
 _CACHE = {}
 _LOCK = threading.RLock()
 
@@ -164,10 +166,13 @@ def certify(data, account, account_uuid, profile=None):
                 _CACHE.clear()
             _CACHE[key] = (time.monotonic(), dict(row))
     except Exception as exc:
-        code = str(exc)
-        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", code):
+        code = getattr(exc, "code", None) or str(exc)
+        if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", code):
             code = "catalog_runtime_invalid"
-        row.update(state="invalid", code=code, message=REBUILD_MESSAGE)
+        if code == QIANNIAOCHENG_STALE_CODE:
+            row.update(state="stale", code=code, message=QIANNIAOCHENG_REBUILD_MESSAGE)
+        else:
+            row.update(state="invalid", code=code, message=REBUILD_MESSAGE)
     return row
 
 

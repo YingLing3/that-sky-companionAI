@@ -236,6 +236,16 @@ def _template_record_dir(manifest, doc):
             names.append(row['record_dir'])
     if cap.get('record_dir'):
         names.append(cap['record_dir'])
+    # 默认目录的源录制可能已不是当前录制；登记中的旧源也参与原指纹核对。
+    try:
+        source_rows = json.loads(Path(xg_paths.long_path(SOURCES)).read_text(encoding='utf-8'))
+        for row in source_rows.values():
+            if type(row) is dict:
+                record_dir = row.get('record_dir')
+                if type(record_dir) is str and record_dir:
+                    names.append(record_dir)
+    except (OSError, ValueError, AttributeError):
+        pass
     for name in dict.fromkeys(names):
         try:
             item = _candidate_record(doc, name)

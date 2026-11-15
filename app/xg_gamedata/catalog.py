@@ -357,6 +357,9 @@ def _verify_all(xg, uuid: str, binding: str, manifest: dict, manifest_path: Path
             else:
                 os.environ[key] = value
     if failures:
+        if all(row["error"] == "asset_catalog_qianniaocheng_stale" for row in failures):
+            raise GameDataError("千鸟城落点已更新，需要重新构建地图目录。",
+                                "catalog_qianniaocheng_stale")
         raise GameDataError("按号目录自检失败 %d 张（已回滚）：%s"
                             % (len(failures), json.dumps(failures[:6], ensure_ascii=False)),
                             "catalog_self_check")

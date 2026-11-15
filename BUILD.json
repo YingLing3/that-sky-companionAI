@@ -1,7 +1,7 @@
 {
   "base_version": "1.0.5",
-  "release": "1.0.5-desktop-ui.10.2-terrainfix.12",
-  "client_revision": "r10.2-terrainfix.12",
+  "release": "1.0.5-desktop-ui.10.2-terrainfix.13",
+  "client_revision": "r10.2-terrainfix.13",
   "frontend": "Twilight cloud-sea redesign (night/dawn themes, starfield, motion layer) over preserved r9 controls and APIs",
   "baseline_source_commit": "78f1d73e7b3e73b3f32d0d706405346dc196c590",
   "current_revision_verification": {
@@ -15,8 +15,8 @@
     "exe_host_rebuilt": false,
     "exe_host_reused_from_revision": "r9",
     "private_server_modified_in_this_patch": false,
-    "source_unittest_cases_run": 955,
-    "source_unittest_cases_passed": 954,
+    "source_unittest_cases_run": 1039,
+    "source_unittest_cases_passed": 1038,
     "source_unittest_cases_failed": 0,
     "source_unittest_cases_skipped": 1
   },
@@ -75,7 +75,7 @@
     "compact_960x640_checked": true,
     "packaged_window_tested": false
   },
-  "previous_package_release": "1.0.5-desktop-ui.10.2-terrainfix.11",
+  "previous_package_release": "1.0.5-desktop-ui.10.2-terrainfix.12",
   "terrain_generation_patch": {
     "revision": "terrainfix.1",
     "date": "2026-11-11",
@@ -1101,5 +1101,142 @@
     "published": false,
     "real_user_data_used": false,
     "full_apk_generation_executed": false
+  },
+  "inherited_terrainfix12_node_verification": {
+    "source_tests_status": "completed_with_missing_input_skip",
+    "all_source_tests_passed": true,
+    "all_source_tests_executed": false,
+    "candidate_live_game_retested": false,
+    "new_archive_live_login_retested": false,
+    "backend_smoke_passed": true,
+    "external_services_used": false,
+    "exe_host_rebuilt": false,
+    "exe_host_reused_from_revision": "r9",
+    "private_server_modified_in_this_patch": false,
+    "source_unittest_cases_run": 955,
+    "source_unittest_cases_passed": 954,
+    "source_unittest_cases_failed": 0,
+    "source_unittest_cases_skipped": 1
+  },
+  "terrainfix_13": {
+    "revision": "terrainfix.13",
+    "version": "1.0.5-desktop-ui.10.2-terrainfix.13",
+    "summary": "保留千鸟城新落点及此前修复；目录模板查找追加登记源录制候选，三项指纹校验保持。",
+    "server_deployment_changed": false,
+    "real_account_or_game_tested": false,
+    "status": "verified_offline",
+    "tests": {
+      "run": 1039,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1,
+      "expectedFailures": 0,
+      "passed": 1038
+    },
+    "date": "2026-11-15",
+    "files_changed": [
+      "BUILD.json",
+      "PACKAGE-MANIFEST.json",
+      "app/bot/account_catalog.py",
+      "app/config/experimental-hop-trial.runtime.json",
+      "app/escort-v31-server/qfsky/map_long0167/asset_catalog_v32c.py",
+      "app/web/desktop.html",
+      "app/web/desktop.js",
+      "app/xg_gamedata/catalog.py",
+      "app/xg_gamedata/catalog_state.py",
+      "app/xg_gamedata/name_data.py",
+      "app/xg_gamedata/spawn_pack.json",
+      "app/xg_gamedata/spawn_pack_0168.json",
+      "tests/fixtures_travel6/destination-records-v25.json",
+      "tests/test_adb_ui12.py",
+      "tests/test_catalog_template13.py",
+      "tests/test_qianniao_spawn13.py",
+      "tests/test_release_terrainfix11.py",
+      "tests/test_spawn_generation13.py",
+      "tests/test_spawn_status13.py",
+      "tests/test_version_pins_0168.py"
+    ]
+  },
+  "qianniao_spawn_patch": {
+    "date": "2026-11-15",
+    "release": "1.0.5-desktop-ui.10.2-terrainfix.13",
+    "scene": "SunsetEnd2",
+    "map_id": 507487826,
+    "variant": "qianniaocheng",
+    "placement_sha256": "353ba870afe64b424caf3b6508d050fefdaa3fede8032a9ed6be9e6b0dd8f73a",
+    "annotation_sha256": "41b507525fda0ef7066001d98bd54aad944185e946b2098d588e90c32506b9c3",
+    "geometry_position": [
+      311.25495800042734,
+      123.33380126953125,
+      -761.5790023206526
+    ],
+    "wire_position_float32": [
+      311.25494384765625,
+      123.83380126953125,
+      -761.5789794921875
+    ],
+    "main_spawn_unchanged": true,
+    "account_actor_generated_locally": true,
+    "requires_catalog_rebuild": true,
+    "static_collision_ok": false,
+    "static_collision_reasons": [
+      "footprint_missing_up_face_within_0.25"
+    ],
+    "user_override": true,
+    "real_game_or_native_collision_rerun": false,
+    "tests": {
+      "run": 1014,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1,
+      "expectedFailures": 0,
+      "passed": 1013
+    },
+    "readme_unchanged": true,
+    "deployed": false,
+    "published": false,
+    "real_user_data_used": false
+  },
+  "inherited_terrainfix13_spawn_verification": {
+    "source_tests_status": "completed_with_missing_input_skip",
+    "all_source_tests_passed": true,
+    "all_source_tests_executed": false,
+    "candidate_live_game_retested": false,
+    "new_archive_live_login_retested": false,
+    "backend_smoke_passed": true,
+    "external_services_used": false,
+    "exe_host_rebuilt": false,
+    "exe_host_reused_from_revision": "r9",
+    "private_server_modified_in_this_patch": false,
+    "source_unittest_cases_run": 1014,
+    "source_unittest_cases_passed": 1013,
+    "source_unittest_cases_failed": 0,
+    "source_unittest_cases_skipped": 1
+  },
+  "catalog_template_source_patch": {
+    "date": "2026-11-15",
+    "release": "1.0.5-desktop-ui.10.2-terrainfix.13",
+    "candidate_order": [
+      "current_capture.by_account",
+      "current_capture.record_dir",
+      "catalog_sources.json"
+    ],
+    "sources_path_from_xg_paths": true,
+    "sources_read_uses_long_path": true,
+    "source_record_sha_actor_sha_account_binding_required": true,
+    "writes_user_data": false,
+    "synthetic_filesystem_regression": true,
+    "full_real_account_catalog_rebuild_executed": false,
+    "tests": {
+      "run": 1039,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1,
+      "expectedFailures": 0,
+      "passed": 1038
+    },
+    "readme_unchanged": true,
+    "deployed": false,
+    "published": false
   }
 }

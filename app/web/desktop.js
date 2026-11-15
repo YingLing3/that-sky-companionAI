@@ -144,6 +144,13 @@ function catalogView(summary, envelope, error='') {
     return {state:'error', title:'地图目录构建未完成', message:task.error || '任务失败或已停止。',
       detail:((task.error_code || task.result?.code) ? '错误码：' + (task.error_code || task.result?.code) + ' · ' : '') + '点“重试构建地图目录”即可；已有遇境录制无需重采，也不需要逐张跑图。', progress:null};
   }
+  const certificate = summary?.catalog;
+  if (certificate?.code === 'catalog_qianniaocheng_stale' && certificate.certified !== true
+      && summary?.account && String(certificate.account || '') === String(summary.account)) {
+    return {state:'waiting', title:'千鸟城落点已更新',
+      message:'千鸟城落点已更新，需要重新构建地图目录',
+      detail:'点“构建地图目录”更新落点；已有当前版本的有效遇境录制无需重采，主出生点保持原义。', progress:null};
+  }
   const ready = certifiedCatalog(summary);
   if (ready) return {state:'success', title:'地图目录构建成功 · 校验通过',
     message:ready.maps !== null ? `${ready.maps} 张地图${ready.variants ? ` + ${ready.variants} 个独立落点` : ''}已就绪。` : '本账号的地图目录已就绪。',

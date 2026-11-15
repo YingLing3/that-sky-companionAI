@@ -7,7 +7,7 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
 APP=ROOT/'app'
-VERSION='1.0.5-desktop-ui.10.2-terrainfix.12'
+VERSION='1.0.5-desktop-ui.10.2-terrainfix.13'
 
 class Tags(HTMLParser):
     def __init__(self,text):
