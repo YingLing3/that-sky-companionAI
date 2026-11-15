@@ -12,6 +12,7 @@ import copy
 import ctypes
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 import threading
@@ -196,6 +197,20 @@ class Client:
             atomic(data_root() / "runtime/runtime-data/registered-device.local.json", json.dumps(profile).encode())
         return account
 
+    def delete(self, identity):
+        """Confirm owner-scoped remote deletion before touching local data."""
+        identity = _account_id(identity)
+        try:
+            reply = self.request("POST", "/v1/accounts/" + identity + "/delete", {}, timeout=30)
+        except AuthError as exc:
+            if exc.status == 404 and exc.code == "not_found":
+                return {"ok": True, "deleted": False, "not_found": True, "account_id": identity}
+            raise
+        if (reply.get("ok") is not True or reply.get("deleted") is not True
+                or reply.get("account_id") != identity):
+            raise AuthError("invalid_delete_receipt")
+        return {"ok": True, "deleted": True, "not_found": False, "account_id": identity}
+
     def renew(self, identity):
         current = cache_get(identity) or {}
         job = self.request("POST", "/v1/accounts/" + identity + "/renew",
@@ -263,13 +278,91 @@ def _cache_read():
 
 def cache_get(identity=None):
     with _disk_lock():
-        rows = _cache_read()["accounts"]
+        data = _cache_read()
+        unavailable = set(_deleted_ids(data)) | set(_pending_ids(data))
+        rows = [r for r in data["accounts"] if r.get("id") not in unavailable]
         return copy.deepcopy(rows if identity is None else next((r for r in rows if r["id"] == identity), None))
+
+
+def _account_id(identity):
+    if not isinstance(identity, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", identity) is None:
+        raise AuthError("invalid_account_id")
+    return identity
+
+
+def _deleted_ids(data):
+    value = data.get("deleted_account_ids", [])
+    if (not isinstance(value, list) or any(not isinstance(x, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", x) is None for x in value)):
+        raise AuthError("runtime_cache_corrupt")
+    return value
+
+
+def _pending_ids(data):
+    value = data.get("pending_account_deletions", [])
+    if (not isinstance(value, list) or any(not isinstance(x, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", x) is None for x in value)):
+        raise AuthError("runtime_cache_corrupt")
+    return value
+
+
+def cache_pending_deletions():
+    with _disk_lock():
+        return list(_pending_ids(_cache_read()))
+
+
+def cache_mark_delete_pending(identity):
+    """Store only confirmed-deleted IDs, never a copy of credentials."""
+    identity = _account_id(identity)
+    with _disk_lock():
+        data = _cache_read()
+        pending = _pending_ids(data)
+        if identity not in pending:
+            data["pending_account_deletions"] = pending + [identity]
+            atomic(data_root() / "runtime/runtime-data/accounts.json",
+                   json.dumps(data, ensure_ascii=False).encode())
+
+
+def cache_finish_delete(identity):
+    identity = _account_id(identity)
+    with _disk_lock():
+        data = _cache_read()
+        pending = _pending_ids(data)
+        if identity in pending:
+            data["pending_account_deletions"] = [x for x in pending if x != identity]
+            atomic(data_root() / "runtime/runtime-data/accounts.json",
+                   json.dumps(data, ensure_ascii=False).encode())
+
+
+def cache_is_deleted(identity):
+    identity = _account_id(identity)
+    with _disk_lock():
+        return identity in _deleted_ids(_cache_read())
+
+
+def cache_delete(identity):
+    """One disk-locked atomic commit: remove credentials and tombstone old ID."""
+    identity = _account_id(identity)
+    with _disk_lock():
+        data = _cache_read()
+        deleted = _deleted_ids(data)
+        rows = [a for a in data["accounts"] if a.get("id") != identity]
+        if identity not in deleted:
+            deleted = deleted + [identity]
+        # Preserve other cached accounts byte-for-value, without re-sanitizing
+        # unrelated entries or copying any removed credentials elsewhere.
+        data.update(accounts=rows, deleted_account_ids=deleted)
+        atomic(data_root() / "runtime/runtime-data/accounts.json",
+               json.dumps(data, ensure_ascii=False).encode())
 
 
 def cache_update(identity, fields):
     with _disk_lock():
         data = _cache_read()
+        deleted = _deleted_ids(data)
+        pending = _pending_ids(data)
+        if identity in deleted or identity in pending:
+            raise AuthError("account_deleted", 410)
         row = next((a for a in data["accounts"] if a["id"] == identity), None)
         if row is None:
             row = {"id": identity}
@@ -279,6 +372,10 @@ def cache_update(identity, fields):
             return  # A slower HTTP response must not roll back rotated credentials.
         row.update(incoming)
         clean = {"accounts": [sanitize_account(a) for a in data["accounts"]]}
+        if deleted:
+            clean["deleted_account_ids"] = list(deleted)
+        if pending:
+            clean["pending_account_deletions"] = list(pending)
         atomic(data_root() / "runtime/runtime-data/accounts.json", json.dumps(clean, ensure_ascii=False).encode())
 
 
@@ -316,7 +413,7 @@ def _heartbeat_loop(identity, cancel, notify=None, *, refresh_session=True,
             terminal = exc.status in (401, 403) or exc.code in (
                 "subscription_required", "subscription_expired", "subscription_paused",
                 "subscription_unavailable", "unauthorized", "account_in_use",
-                "reauth_required", "verification_required", "not_found")
+                "reauth_required", "verification_required", "not_found", "account_deleted")
             if terminal:
                 cancel.set()
                 report(exc.code)

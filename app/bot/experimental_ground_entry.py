@@ -339,6 +339,24 @@ class EngineeringObservations(ObservationStore):
 
 class ExperimentalGroundHook:
     """Per-instance seam: only explicit candidate entry installs this hook."""
+    def _body_origin_offset(self, config):
+        """身体原点离脚底的高度按小光当前号的站姿算（身高不同差很多）；看不出就用配置值 0.5。"""
+        base = tuple(vec(config['originOffset']))
+        try:
+            import social_pose
+            seed = getattr(self.c, 'seed', None) or getattr(self.c, 'raw_seed', None)
+            y = social_pose.body_origin_offset(seed)
+        except Exception:
+            y = None
+        if y is None or not -2 <= y <= 2:
+            return base
+        if abs(y - base[1]) > 1e-3:
+            try:
+                self.c.log('body_origin_offset', value=y, default=base[1])
+            except Exception:
+                pass
+        return (base[0], float(y), base[2])
+
     def __init__(self, c, config, *, config_path=None, clock=time.monotonic,
                  backend_factory=BoundBackendFactory, session_deadline=None):
         self.c, self.clock, self.factory = c, clock, backend_factory
@@ -917,8 +935,9 @@ class ExperimentalGroundHook:
             target=dict(uuid=peer, slot=int(slot), incarnation=life.target_incarnation))
         row = config['bindingRow']
         from hop_follow_runtime_v20 import entry_hop_backend_options
+        origin_offset = self._body_origin_offset(config)
         backend = self.factory(config['assetRoot'], engine_root=config['engineRoot'],
-            node_executable=config['nodeExecutable'], foot_offset=vec(config['originOffset']),
+            node_executable=config['nodeExecutable'], foot_offset=origin_offset,
             navigation_window=row.get('navigation_window'),
             worker_profile='preserving_imported_nav', **entry_hop_backend_options(config))(row, scene)
         try:
@@ -936,7 +955,7 @@ class ExperimentalGroundHook:
                 navigationSHA256=row['staged_navigation']['navigation_sha256'])
             movement = config.get('movement', {})
             admission = experimental_admission(context, patch,
-                offset=config['originOffset'], enabled=True,
+                offset=list(origin_offset), enabled=True,
                 speed=movement.get('walkSpeed', .25),
                 requested_distance=movement.get('maxSegmentMeters', .8),
                 distance=movement.get('travelBudgetMeters', .8),

@@ -147,7 +147,13 @@
     const valid = !!catalog && catalog.certified === true && !!summary.account && String(catalog.account) === String(summary.account);
     const running = summary && summary.task && summary.task.kind === "catalog" && summary.task.running;
     $("wz-catalog-start").textContent = valid ? "重新校验/重建地图目录" : "构建地图目录";
-    if (!running) {
+    const checking = !running && !!catalog && catalog.state === "checking" && !!summary.account
+      && String(catalog.account) === String(summary.account);
+    if (checking) {
+      $("wz-cat-progress").value = 0;
+      $("wz-cat-pct").textContent = "正在校验…";
+      $("wz-cat-msg").textContent = catalog.message || "正在校验地图目录…";
+    } else if (!running) {
       $("wz-cat-progress").value = valid ? 100 : 0;
       $("wz-cat-pct").textContent = valid ? "100% · 校验通过" : "未生成 / 未通过校验";
       $("wz-cat-msg").textContent = valid ? "地图目录构建成功 · 当前版本校验通过。" :

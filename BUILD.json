@@ -1,7 +1,7 @@
 {
   "base_version": "1.0.5",
-  "release": "1.0.5-desktop-ui.10.2-terrainfix.13",
-  "client_revision": "r10.2-terrainfix.13",
+  "release": "1.0.5-desktop-ui.10.2-terrainfix.14",
+  "client_revision": "r10.2-terrainfix.14",
   "frontend": "Twilight cloud-sea redesign (night/dawn themes, starfield, motion layer) over preserved r9 controls and APIs",
   "baseline_source_commit": "78f1d73e7b3e73b3f32d0d706405346dc196c590",
   "current_revision_verification": {
@@ -10,13 +10,13 @@
     "all_source_tests_executed": false,
     "candidate_live_game_retested": false,
     "new_archive_live_login_retested": false,
-    "backend_smoke_passed": true,
+    "backend_smoke_passed": false,
     "external_services_used": false,
     "exe_host_rebuilt": false,
     "exe_host_reused_from_revision": "r9",
     "private_server_modified_in_this_patch": false,
-    "source_unittest_cases_run": 1039,
-    "source_unittest_cases_passed": 1038,
+    "source_unittest_cases_run": 1112,
+    "source_unittest_cases_passed": 1111,
     "source_unittest_cases_failed": 0,
     "source_unittest_cases_skipped": 1
   },
@@ -75,7 +75,7 @@
     "compact_960x640_checked": true,
     "packaged_window_tested": false
   },
-  "previous_package_release": "1.0.5-desktop-ui.10.2-terrainfix.12",
+  "previous_package_release": "1.0.5-desktop-ui.10.2-terrainfix.13",
   "terrain_generation_patch": {
     "revision": "terrainfix.1",
     "date": "2026-11-11",
@@ -1238,5 +1238,38 @@
     "readme_unchanged": true,
     "deployed": false,
     "published": false
+  },
+  "inherited_terrainfix13_template_verification": {
+    "source_tests_status": "completed_with_missing_input_skip",
+    "all_source_tests_passed": true,
+    "all_source_tests_executed": false,
+    "candidate_live_game_retested": false,
+    "new_archive_live_login_retested": false,
+    "backend_smoke_passed": true,
+    "external_services_used": false,
+    "exe_host_rebuilt": false,
+    "exe_host_reused_from_revision": "r9",
+    "private_server_modified_in_this_patch": false,
+    "source_unittest_cases_run": 1039,
+    "source_unittest_cases_passed": 1038,
+    "source_unittest_cases_failed": 0,
+    "source_unittest_cases_skipped": 1
+  },
+  "terrainfix_14": {
+    "date": "2026-11-16",
+    "release": "1.0.5-desktop-ui.10.2-terrainfix.14",
+    "tests": {
+      "modules": 54,
+      "run": 1112,
+      "failed": 0,
+      "skipped": 1,
+      "passed": 1111,
+      "failing_modules": []
+    },
+    "summary": "删除单个账号（配合登录服务 POST /v1/accounts/{id}/delete）、账号已被他人绑定如实提示；地图目录校验结果按指纹缓存并后台执行（不再卡住界面）；地形 base 阶段遇旧版本中间产物自动重建。",
+    "finished_by": "Claude (Codex usage limit reached mid-task)",
+    "deployed": false,
+    "published": false,
+    "readme_unchanged": true
   }
 }

@@ -454,6 +454,21 @@ def apk_inventory(apk: Path):
 # --------------------------------------------------------------------------- #
 # stage 1: base geometry + base navigation
 # --------------------------------------------------------------------------- #
+BASE_STALE_RESUME_CODES = ("resume_source_changed_use_new_output", "resume_inventory_changed",
+                           "existing_catalog_requires_resume")
+
+
+def _base_resume_stale(log_path: Path, start: int) -> bool:
+    """True when this run's base.log output shows the resume source came from an older build."""
+    try:
+        with open(log_path, "rb") as handle:
+            handle.seek(max(0, start))
+            tail = handle.read()[-65536:].decode("utf-8", "replace")
+    except OSError:
+        return False
+    return any(code in tail for code in BASE_STALE_RESUME_CODES)
+
+
 def base_stage(apk: Path, work: Path, maps: list[str], all_scenes: list[str],
                node: str, resume: bool, timeout: int, summary: dict, progress: StageProgress):
     node=xg_paths.require_node_exe(node)
@@ -481,7 +496,18 @@ def base_stage(apk: Path, work: Path, maps: list[str], all_scenes: list[str],
             log(f"[base] catalog: {obj.get('summary')}")
 
     log(f"[base] {len(maps)} 张图 -> {out}")
-    code, seconds = run_stream(cmd, work / "logs" / "base.log", line, env)
+    log_path = work / "logs" / "base.log"
+    start = log_path.stat().st_size if log_path.exists() else 0
+    code, seconds = run_stream(cmd, log_path, line, env)
+    if code != 0 and "--resume" in cmd and _base_resume_stale(log_path, start):
+        # 旧版本留下的中间目录（实现/APK 身份已变）不能续跑：清掉该阶段从头生成。
+        log("[base] 旧版本中间文件已自动清理，正在重新生成")
+        remove_tree(out, work)
+        out.mkdir(parents=True, exist_ok=True)
+        cmd = [part for part in cmd if part != "--resume"]
+        code, more = run_stream(cmd, log_path, line, env)
+        seconds += more
+        summary["stages"]["base_rebuilt_stale_resume"] = True
     summary["stages"]["base"] = {"seconds": seconds, "exit_code": code}
     if code != 0:
         raise RuntimeError(f"base 阶段失败，见 {work / 'logs' / 'base.log'}")

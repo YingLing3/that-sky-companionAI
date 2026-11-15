@@ -57,13 +57,26 @@ def _limit_velocity(v,policy):
     return (v[0]*scale,max(-policy.max_vertical,min(policy.max_vertical,v[1])),v[2]*scale)
 
 
+DEFAULT_BODY_ORIGIN=.5
+
+
+def body_origin(terrain):
+    """terrain.hits 返回的是“小光身高下的身体原点”高度；取出这个身高值（异常时按 0.5）。"""
+    try:
+        y=float(getattr(terrain,'offset')[1])
+        return y if math.isfinite(y) and -2<=y<=2 else DEFAULT_BODY_ORIGIN
+    except (AttributeError,TypeError,ValueError,IndexError):return DEFAULT_BODY_ORIGIN
+
+
 def support_below(terrain, point):
-    """只取脚下可站层；不能拿头顶层或云当落脚证据。"""
+    """只取脚下可站层；不能拿头顶层或云当落脚证据。
+    小光比普通身高高时，地面层换算出来也更高；容差随之放宽，别把别人脚下那层滤掉。"""
     if terrain is None:return None
     try:
+        tol=.3+max(0.,body_origin(terrain)-.2)
         rows=[float(h) for _,h,ny in terrain.hits(point[0],point[2])
               if math.isfinite(float(h)) and float(ny)>=math.cos(math.radians(42))
-              and h<=point[1]+.3]
+              and h<=point[1]+tol]
         return max(rows) if rows else None
     except (AttributeError,TypeError,ValueError):return None
 
@@ -107,7 +120,11 @@ class TargetTracker:
                     delta=(wanted-self.heading+math.pi)%math.tau-math.pi
                     self.heading+=max(-math.pi*dt,min(math.pi*dt,delta))
         self.samples.append((stamp,p));self.samples=self.samples[-32:]
-        ground=support_below(terrain,p);height=None if ground is None else p[1]-ground
+        ground=support_below(terrain,p)
+        # 被观察的是别人：离地高度按普通身高换算，不受小光自己身高影响（与改动前 0.5 时完全一致）。
+        own=body_origin(terrain)
+        shift=0. if abs(own)<1e-6 else own-DEFAULT_BODY_ORIGIN   # 偏移 0 = 几何坐标地形，不换算
+        height=None if ground is None else p[1]-(ground-shift)
         hs=math.hypot(self.velocity[0],self.velocity[2])
         if height is None:
             self.ground_since=None

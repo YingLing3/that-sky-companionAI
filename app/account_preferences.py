@@ -39,3 +39,11 @@ def save(identity, value):
         current.pop(str(identity), None)
     xg_paths.write_json(xg_paths.CONTROL / "account_nicknames.json", current)
     return value
+
+
+def remove(identity):
+    """Remove only this account's local label; never touch persona or memory."""
+    current = labels()
+    if str(identity) in current:
+        current.pop(str(identity))
+        xg_paths.write_json(xg_paths.CONTROL / "account_nicknames.json", current)

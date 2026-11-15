@@ -4,6 +4,7 @@ The loader runs in a separate process: status polling never changes the server's
 global QFLY/QFSKY environment. No task-success flag can certify an output folder.
 """
 from __future__ import annotations
+from collections import OrderedDict
 import hashlib
 import json
 import os
@@ -23,7 +24,12 @@ import xg_exec
 REBUILD_MESSAGE = "目录需要用当前版本重新录制遇境后重建"
 QIANNIAOCHENG_STALE_CODE = "catalog_qianniaocheng_stale"
 QIANNIAOCHENG_REBUILD_MESSAGE = "千鸟城落点已更新，需要重新构建地图目录"
-_CACHE = {}
+CHECKING_CODE = "catalog_checking"
+CHECKING_MESSAGE = "正在后台校验当前账号的地图目录，请稍候"
+MAX_CACHED_RESULTS = 32
+MAX_ACTIVE_CHECKS = 2
+_CACHE = OrderedDict()  # Terminal results live until fingerprint change/eviction/restart.
+_INFLIGHT = {}          # One task per account scope, bounded globally; no queued threads.
 _LOCK = threading.RLock()
 
 
@@ -129,6 +135,81 @@ def _runtime_check(request):
     return response["checked"]
 
 
+def _failure(row, exc):
+    result = dict(row)
+    code = getattr(exc, "code", None) or str(exc)
+    if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", code):
+        code = "catalog_runtime_invalid"
+    if code == "catalog_version_stale":
+        result.update(state="stale", code=code, message=REBUILD_MESSAGE)
+    elif code == QIANNIAOCHENG_STALE_CODE:
+        result.update(state="stale", code=code, message=QIANNIAOCHENG_REBUILD_MESSAGE)
+    else:
+        result.update(state="invalid", code=code, message=REBUILD_MESSAGE)
+    return result
+
+
+def _qianniao_precheck(manifest, folder):
+    """Only reject stale named placement; never certify account/capture readiness."""
+    variants = manifest.get("variants") or {}
+    if not isinstance(variants, dict):
+        raise ValueError("catalog_variants_invalid")
+    named = variants.get("507487826") or {}
+    if not isinstance(named, dict):
+        raise ValueError("catalog_variants_invalid")
+    if "qianniaocheng" not in named:
+        return  # The full loader still enforces exact completeness.
+    row = named["qianniaocheng"]
+    from qfsky.map_long0167 import asset_catalog_v32c as policy_module
+    policy_table = json.loads(policy_module._EXPECTED_VARIANTS_JSON)
+    if hashlib.sha256(policy_module.canonical_json(policy_table)).hexdigest() != policy_module._EXPECTED_VARIANTS_SHA:
+        raise ValueError("catalog_variant_policy_invalid")
+    policy = (policy_table.get("507487826") or {}).get("qianniaocheng")
+    if not isinstance(policy, dict) or any(k not in policy for k in ("scene", "placement_sha256", "annotation_sha256")):
+        raise ValueError("catalog_variant_policy_invalid")
+    if not isinstance(row, dict) or any(row.get(k) != policy[k] for k in ("scene", "placement_sha256", "annotation_sha256")):
+        raise ValueError(QIANNIAOCHENG_STALE_CODE)
+    # Fixed relative path, not a path supplied by untrusted manifest metadata.
+    with (folder / "SunsetEnd2/variants/qianniaocheng/placement.json").open("rb") as stream:
+        raw = stream.read(128 * 1024 + 1)
+    if len(raw) > 128 * 1024:
+        raise ValueError("metadata_size")
+    placement = json.loads(raw)
+    if not isinstance(placement, dict):
+        raise ValueError("metadata_shape")
+    annotation = (placement.get("provenance") or {}).get("annotation")
+    if (hashlib.sha256(raw).hexdigest() != policy["placement_sha256"]
+            or hashlib.sha256(policy_module.canonical_json(annotation)).hexdigest() != policy["annotation_sha256"]):
+        raise ValueError(QIANNIAOCHENG_STALE_CODE)
+
+
+def _cache_result(key, row):
+    """Caller holds _LOCK; metadata only, no I/O or process work in this lock."""
+    _CACHE[key] = dict(row)
+    _CACHE.move_to_end(key)
+    while len(_CACHE) > MAX_CACHED_RESULTS:
+        _CACHE.popitem(last=False)
+
+
+def _background_check(scope, key, job, request, xg, folder, before, row):
+    try:
+        checked = _runtime_check(request)
+        if before != _fingerprint(xg, folder):
+            raise ValueError("catalog_changed_during_validation")
+        result = dict(row, certified=True, state="ready", code="",
+                      message="当前账号目录已通过实际运行时校验",
+                      maps=int(checked["maps"]), variants=int(checked["variants"]))
+    except Exception as exc:
+        result = _failure(row, exc)
+    finally:
+        # Even an unexpected BaseException must release the reserved slot.
+        with _LOCK:
+            if _INFLIGHT.get(scope) is job:
+                if job["latest"] == key and "result" in locals():
+                    _cache_result(key, result)
+                del _INFLIGHT[scope]
+
+
 def certify(data, account, account_uuid, profile=None):
     from qfsky.version_profile import CURRENT_BUILD, profile_for_build
     profile = dict(profile or profile_for_build(CURRENT_BUILD))
@@ -145,35 +226,68 @@ def certify(data, account, account_uuid, profile=None):
     if not manifest_path.is_file():
         return row
     try:
-        manifest = _json(manifest_path)
-        if (manifest.get("apk_build") != profile.get("build")
-                or manifest.get("native_sha256") != profile.get("native_sha256")):
-            row.update(state="stale", code="catalog_version_stale", message=REBUILD_MESSAGE)
-            return row
-        request = {"data": str(xg.DATA), "account": account, "uuid": str(account_uuid), "build": profile["build"]}
+        # Fingerprint before reading metadata: a concurrent atomic replacement must
+        # never bind an old rejection to the new file's long-lived cache key.
         before = _fingerprint(xg, folder)
-        key = (str(xg.DATA), account, str(account_uuid), profile["build"], profile.get("resource_revision"), before)
+        scope = (str(xg.DATA), account, str(account_uuid), profile["build"],
+                 profile.get("resource_revision"), profile.get("native_sha256"))
+        key = (*scope, before)
+        checking = dict(row, state="checking", code=CHECKING_CODE, message=CHECKING_MESSAGE)
         with _LOCK:
+            pending = _INFLIGHT.get(scope)
+            if pending is not None:
+                pending["latest"] = key
             cached = _CACHE.get(key)
-            if cached and time.monotonic() - cached[0] < 15:
-                return dict(cached[1])
-            checked = _runtime_check(request)
-            if before != _fingerprint(xg, folder):
-                raise ValueError("catalog_changed_during_validation")
-            row.update(certified=True, state="ready", code="", message="当前账号目录已通过实际运行时校验",
-                       maps=int(checked["maps"]), variants=int(checked["variants"]))
-            if len(_CACHE) > 32:
-                _CACHE.clear()
-            _CACHE[key] = (time.monotonic(), dict(row))
+            if cached is not None:
+                _CACHE.move_to_end(key)
+                return dict(cached)
+        failure = None
+        try:
+            manifest = _json(manifest_path)
+            if (manifest.get("apk_build") != profile.get("build")
+                    or manifest.get("native_sha256") != profile.get("native_sha256")):
+                raise ValueError("catalog_version_stale")
+            _qianniao_precheck(manifest, folder)
+        except Exception as exc:
+            failure = _failure(row, exc)
+        # File I/O is outside _LOCK, including every failure-path recheck.
+        if before != _fingerprint(xg, folder):
+            return checking
+        if failure is not None:
+            with _LOCK:
+                _cache_result(key, failure)
+            return failure
+        request = {"data": str(xg.DATA), "account": account, "uuid": str(account_uuid), "build": profile["build"]}
+        with _LOCK:
+            # Another caller/worker may have completed while the cheap check ran.
+            cached = _CACHE.get(key)
+            if cached is not None:
+                _CACHE.move_to_end(key)
+                return dict(cached)
+            pending = _INFLIGHT.get(scope)
+            if pending is not None:
+                pending["latest"] = key
+                return checking
+            if len(_INFLIGHT) >= MAX_ACTIVE_CHECKS:
+                return checking
+            job = {"latest": key}
+            _INFLIGHT[scope] = job
+        try:
+            # Starting and running a worker both happen outside the metadata lock.
+            threading.Thread(target=_background_check,
+                args=(scope, key, job, request, xg, folder, before, row),
+                name="catalog-certification", daemon=True).start()
+        except Exception:
+            result = _failure(row, ValueError("catalog_check_start_failed"))
+            with _LOCK:
+                if _INFLIGHT.get(scope) is job:
+                    if job["latest"] == key:
+                        _cache_result(key, result)
+                    del _INFLIGHT[scope]
+            return result
+        return checking
     except Exception as exc:
-        code = getattr(exc, "code", None) or str(exc)
-        if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", code):
-            code = "catalog_runtime_invalid"
-        if code == QIANNIAOCHENG_STALE_CODE:
-            row.update(state="stale", code=code, message=QIANNIAOCHENG_REBUILD_MESSAGE)
-        else:
-            row.update(state="invalid", code=code, message=REBUILD_MESSAGE)
-    return row
+        return _failure(row, exc)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ const context=vm.createContext({Map,Set,Date,JSON,Number,String,console,document
  loadAccounts:async()=>true,refreshStatus:async()=>true,renderAccounts:()=>{},postJson:async(p,b)=>{calls.push([p,b]);return {ok:true};},
  request:async(p,o)=>{calls.push([p,o]);return {ok:true,message:'续期成功'};}
 });
-const declarations='const accountOps={drafts:new Map(),saving:new Set(),renewing:new Set(),messages:new Map()};';
+const declarations='const accountOps={drafts:new Map(),saving:new Set(),renewing:new Set(),deleting:new Set(),pendingCleanup:new Map(),messages:new Map()};';
 const names=['accountOpButton','appendAccountOperations','buildAccountCard','normalizeAccount','normalizeStatus','syncMapActions','renderTopStatus'];
 const compiled=declarations+'\n'+names.map(fn).join('\n');vm.runInContext(compiled,context);
 function walk(el){return [el,...el.childNodes.flatMap(walk)];}

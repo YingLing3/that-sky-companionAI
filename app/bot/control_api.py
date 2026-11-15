@@ -372,6 +372,38 @@ def account_process_matches(row, identity):
     return identity == xg_account.active_id()
 
 
+def _account_delete_processes(identity):
+    scripts = (("launcher/supervisor_sixhour.py", "candidate_supervisor_sixhour_v22.py")
+               + xg_runtime.GO_SCRIPTS + xg_runtime.RUN_SCRIPTS + ("bot/ai_companion.py",))
+    return [row for row in xg_proc.find_any_script(scripts) if account_process_matches(row, identity)]
+
+
+def delete_account(identity, confirm=False):
+    if not isinstance(identity, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", identity) is None:
+        return {"ok": False, "error": "invalid_account_id", "message": "账号标识无效，请刷新账号列表"}
+    if confirm is not True:
+        return {"ok": False, "error": "delete_confirmation_required", "message": "删除游戏账号需要二次确认"}
+    from xg_auth_client import cache_is_deleted, AuthError
+    try:
+        known = xg_account.account_by_id(identity) or cache_is_deleted(identity)
+    except AuthError as exc:
+        return {"ok": False, "error": exc.code, "message": "账号缓存读取失败，未执行删除"}
+    if not known:
+        return {"ok": False, "error": "account_not_found", "message": "本机没有这个账号，请先刷新账号列表"}
+    if _cleanup_busy():
+        return {"ok": False, "error": "task_busy", "message": "请先停止采集或等待当前构建完成，再删除游戏账号"}
+    # Deletion never silently disconnects a running account. The user must
+    # explicitly stop it first; the global operation lock prevents a new start.
+    if _account_delete_processes(identity):
+        return {"ok": False, "error": "account_running_stop_required",
+                "message": "该账号正在使用，请先让小光下线并停止聊天/换图，再删除账号。"}
+    out = account_cmd("delete", {"account": identity, "confirm": True})
+    if out.get("ok") or out.get("remote_deleted"):
+        xg_account.cache_clear()
+        xg_runtime.refresh(identity)
+    return out
+
+
 def renew_account(identity):
     # Rotate offline credentials only; never silently disconnect a live game.
     if not xg_account.account_by_id(identity):
@@ -991,6 +1023,9 @@ class Handler(BaseHTTPRequestHandler):
             if api in ("/renew", "/accounts/renew"):
                 identity = str(data.get("account") or xg_account.active_id()) if api == "/renew" else str(data.get("account") or "")
                 out = renew_account(identity)
+                return self.reply(200 if out.get("ok") else 409, out)
+            if api == "/accounts/delete":
+                out = delete_account(data.get("account"), data.get("confirm"))
                 return self.reply(200 if out.get("ok") else 409, out)
             if api == "/accounts/remark":
                 out = account_cmd("remark", {"account": data.get("account"), "nickname": data.get("nickname", "")})

@@ -10,10 +10,23 @@ import time
 
 import xg_paths
 import account_preferences
-from xg_auth_client import Client, AuthError, atomic, cache_update
+from xg_auth_client import Client, AuthError, atomic, cache_update, cache_delete, cache_is_deleted, cache_pending_deletions, cache_mark_delete_pending, cache_finish_delete
 
 
 AUTH_ERROR_MESSAGES = {
+    "account_bound_elsewhere": "这个游戏号已在另一位使用者的小光里登录。请让对方在小光账号列表里点‘删除’后再登录。（错误码：account_bound_elsewhere）",
+    "account_identity_changed": "本次返回的游戏账号身份与原绑定不一致，已停止更新；请确认登录的是正确游戏账号。",
+    "account_deleted": "这个账号已被删除，请重新登录。",
+    "invalid_account_id": "账号标识无效，请刷新账号列表后重试。",
+    "invalid_delete_receipt": "服务返回的删除确认与所选账号不一致，本地账号未清理。",
+    "delete_confirmation_required": "删除游戏账号需要二次确认。",
+    "account_delete_local_failed": "远端删除已确认，但本地清理未完成；请再次删除同一账号以完成清理。",
+    "password_required": "请填写游戏邮箱密码。",
+    "invalid_credentials": "游戏邮箱或密码不正确，请检查后重试。",
+    "invalid_password": "游戏密码不正确或格式无效，请检查后重试。",
+    "invalid_email": "游戏邮箱格式不正确，请检查后重试。",
+    "account_locked": "游戏账号已被锁定，请先在官方客户端处理。",
+    "account_banned": "游戏账号被限制登录，请先在官方客户端确认账号状态。",
     "renew_in_progress": "续期仍在处理中，请稍后刷新账号列表，避免重复点击。",
     "renew_failed": "续期未完成，请重新登录该账号。",
     "account_not_found": "账号已不存在，请刷新账号列表。",
@@ -37,8 +50,17 @@ AUTH_ERROR_MESSAGES = {
     "upstream_unavailable": "登录服务暂时未能完成请求，请稍后再试。",
     "device_verification_required": "登录服务要求设备安全验证，请先在官方客户端完成验证后再试。",
     "device_context_missing": "本次登录的设备状态缺失，请重新发起登录。",
-    "login_failed": "本次登录未成功，登录服务未返回更具体的原因。请核对验证码；若仍失败，请保留此错误码排查。",
+    "login_failed": "本次登录未成功，登录服务未返回更具体的原因。请核对当前登录方式的账号信息，并保留错误码排查。",
 }
+
+
+def error_result(code, fallback="操作未完成，请保留错误码排查。"):
+    if not isinstance(code, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code) is None:
+        code = "login_failed"
+    message = AUTH_ERROR_MESSAGES.get(code, fallback)
+    if "错误码：" not in message and code != "account_deleted":
+        message += "（错误码：" + code + "）"
+    return {"ok": False, "error": code, "code": code, "message": message}
 
 
 def active_id():
@@ -79,22 +101,43 @@ def result(job, client):
         if error and (kind in ("sms", "sms_code") or (state == "needs_code" and not kind)):
             if not isinstance(error, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", error):
                 error = "login_failed"
-            message = AUTH_ERROR_MESSAGES.get(error, "本次登录未完成，登录服务未返回更具体的原因。请保留错误码排查。")
-            return {"ok": False, "pending": job["job_id"], "error": error,
-                    "message": message + "（错误码：" + error + "）"}
+            out = error_result(error, "本次登录未完成，登录服务未返回更具体的原因。请保留错误码排查。")
+            out["pending"] = job["job_id"]
+            return out
         return {"ok": False, "pending": job["job_id"], "message": "请填写短信验证码",
                 "verify": {"ticket": job["job_id"], "kind": challenge.get("kind", "sms")}}
     if state == "running":
         return {"ok": False, "pending": job["job_id"], "message": "登录仍在处理中，请稍后查看"}
     error = job.get("error") or "login_failed"
-    return {"ok": False, "error": error, "message": AUTH_ERROR_MESSAGES.get(error, "登录未完成，请重试或完成账号验证")}
+    return error_result(error, "登录未完成，请检查当前登录方式的账号信息并保留错误码排查。")
 
 
 def cmd_list(_req):
-    out = Client().request("GET", "/v1/accounts")
+    pending = cache_pending_deletions()
+    remote_error = None
+    try:
+        out = Client().request("GET", "/v1/accounts")
+    except AuthError as exc:
+        if not pending:
+            raise
+        out = {"accounts": []}
+        remote_error = exc.code
     for row in out["accounts"]:
-        cache_update(row["id"], {k: row[k] for k in ("alias", "platform", "status", "created_at", "last_renew_at") if k in row})
-    return {"ok": True, "active": active_id(), "accounts": [view(a) for a in out["accounts"]]}
+        try:
+            cache_update(row["id"], {k: row[k] for k in ("alias", "platform", "status", "created_at", "last_renew_at") if k in row})
+        except AuthError as exc:
+            if exc.code != "account_deleted":
+                raise
+    # A delayed list reply from before deletion must not re-display the old ID.
+    pending = cache_pending_deletions()
+    rows = [view(a) for a in out["accounts"] if not cache_is_deleted(a["id"]) and a["id"] not in pending]
+    rows.extend({"id": identity, "alias": "本地清理待重试", "status": "cleanup_pending",
+                 "cleanup_pending": True, "active": False, "remember": False}
+                for identity in pending)
+    result = {"ok": True, "active": active_id() if active_id() not in pending else "", "accounts": rows}
+    if remote_error:
+        result.update(partial=True, error=remote_error, message="远端列表暂不可用；仍可重试已确认删除账号的本地清理。")
+    return result
 
 
 def cmd_email(req):
@@ -254,7 +297,35 @@ def cmd_renew(req):
     return {"ok": True, "account": view(safe), "message": "续期成功，下次上线会使用新的登录状态。"}
 
 
-COMMANDS = {"remark": cmd_remark, "renew": cmd_renew, "list": cmd_list, "email": cmd_email, "send": cmd_send, "verify": cmd_verify,
+def cmd_delete(req):
+    identity = req.get("account")
+    if req.get("confirm") is not True:
+        raise AuthError("delete_confirmation_required")
+    # Also allow retry after a partial local commit, but never an arbitrary ID.
+    pending = identity in cache_pending_deletions()
+    if not pending and not cache_is_deleted(identity):
+        account_preferences.known_account(identity)
+    # A persisted pending ID is proof of the previous remote confirmation.
+    # Retrying local-only cleanup must also work while the service is offline.
+    receipt = {"not_found": False} if pending else Client().delete(identity)
+    try:
+        if not pending:
+            cache_mark_delete_pending(identity)
+        cache_delete(identity)
+        if active_id() == identity:
+            atomic(xg_paths.ACTIVE_ACCOUNT, b"")
+        account_preferences.remove(identity)
+        cache_finish_delete(identity)
+    except (OSError, ValueError, AuthError):
+        out = error_result("account_delete_local_failed")
+        out.update(remote_deleted=True, account=identity)
+        return out
+    return {"ok": True, "deleted": True, "account": identity, "active": active_id(),
+            "remote_not_found": receipt["not_found"],
+            "message": "已删除该游戏账号及本机登录缓存、备注；录制目录、人设和聊天记忆已保留。"}
+
+
+COMMANDS = {"delete": cmd_delete, "remark": cmd_remark, "renew": cmd_renew, "list": cmd_list, "email": cmd_email, "send": cmd_send, "verify": cmd_verify,
             "confirm": cmd_confirm, "select": cmd_select, "resume": cmd_resume, "friends": cmd_friends, "owner": cmd_owner}
 
 
@@ -265,7 +336,7 @@ def main(argv):
         out = COMMANDS[cmd](req)
     except AuthError as exc:
         code = "login_expired" if exc.code == "not_found" and cmd in ("confirm", "verify", "resume") else exc.code
-        out = {"ok": False, "error": code, "message": AUTH_ERROR_MESSAGES.get(code, "操作未完成，请稍后重试")}
+        out = error_result(code)
     except ValueError as exc:
         out = {"ok": False, "error": "invalid_input", "message": str(exc) if cmd == "remark" else "账号信息不完整，请刷新列表后重试"}
     except Exception:

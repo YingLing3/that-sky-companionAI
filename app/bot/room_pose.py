@@ -3472,7 +3472,7 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
                 if _solo_revision is not None and _solo_revision!=getattr(self,"_solo_revision",0):return
                 if self._solo_start(key,label):return
                 prev=self.event.stamp() if self.event is not None else anim_pose.read(self.seed)
-                ev=anim_pose.AnimEvent(key,prev,time.monotonic(),seconds)
+                ev=anim_pose.EmoteOnceEvent(key,prev,time.monotonic(),seconds)
                 action=self._once_begin(ev,"anim",label,_once_request)
                 if action is None:return
                 self.log("anim_start",anim=label,generation=ev.gen,seconds=round(seconds,2))

@@ -12,6 +12,7 @@ import tempfile
 import types
 import unittest
 from unittest import mock
+from test_catalog_async14 import settled, wait_idle
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app"
@@ -42,6 +43,7 @@ def write_json(path, doc):
 
 class StatusTests(unittest.TestCase):
     def setUp(self):
+        wait_idle()
         self.temp = tempfile.TemporaryDirectory(prefix="spawn-status13-", dir=ROOT / "tests")
         self.addCleanup(self.temp.cleanup)
         self.data = Path(self.temp.name)
@@ -52,7 +54,7 @@ class StatusTests(unittest.TestCase):
         self.addCleanup(catalog_state._CACHE.clear)
 
     def certify(self):
-        return catalog_state.certify(self.data, ACCOUNT, UUID, PROFILE)
+        return settled(self.data, ACCOUNT, UUID)
 
     def test_new_verified_directory_is_ready(self):
         with mock.patch.object(catalog_state, "_runtime_check", return_value={"maps": 115, "variants": 1}) as check:
@@ -81,6 +83,8 @@ class StatusTests(unittest.TestCase):
     def test_other_runtime_failures_are_not_relabelled(self):
         for code in ("capture_version_stale", "catalog_account_mismatch", "catalog_self_check",
                      "catalog_source_capture_changed", "catalog_incomplete"):
+            # Each failure case represents changed input; unchanged failures are now cached.
+            write_json(self.path, {"apk_build": PROFILE["build"], "native_sha256": PROFILE["native_sha256"], "fixture_case": code})
             with self.subTest(code=code), mock.patch.object(catalog_state, "_runtime_check", side_effect=ValueError(code)):
                 row = self.certify()
             self.assertFalse(row["certified"])
@@ -128,6 +132,8 @@ class StatusTests(unittest.TestCase):
     def test_rebuild_requires_fresh_success_not_stale_failure_cache(self):
         with mock.patch.object(catalog_state, "_runtime_check", side_effect=ValueError(CODE)):
             self.assertFalse(self.certify()["certified"])
+        # A real rebuild changes its output fingerprint before a cached failure may retry.
+        write_json(self.path, {"apk_build": PROFILE["build"], "native_sha256": PROFILE["native_sha256"], "fixture_rebuild": 1})
         with mock.patch.object(catalog_state, "_runtime_check", return_value={"maps": 115, "variants": 1}) as check:
             self.assertTrue(self.certify()["certified"])
         check.assert_called_once()

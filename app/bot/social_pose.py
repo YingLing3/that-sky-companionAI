@@ -181,7 +181,17 @@ def _feet_down(body):
     p = anim_pose.pose_values(body)
     ys = [v[1] for k, v in p.items() if k.split("|")[0] in FEET and len(v) == 3]
     torso = [v[1] for k, v in p.items() if k.split("|")[0] == BODY and len(v) == 3]
-    return bool(ys) and bool(torso) and all(95 <= y <= 101 for y in ys) and all(136 <= y <= 152 for y in torso)
+    if not ys or not torso:
+        return False
+    if all(95 <= y <= 101 for y in ys) and all(136 <= y <= 152 for y in torso):
+        return True
+    # 2026-11-15：身高不同的号骨骼绝对值不同（高个子脚 y≈85、身体≈143；矮个子脚≈114、身体≈159）。
+    # 按身体自己的比例判断：两脚同高、身体比脚高出正常站立的距离，就是站好了；
+    # 否则才换成参考站姿（参考站姿是普通身高录的，套到别的身高会弯腿、压掉动作）。
+    # 范围放宽到覆盖最矮到最高的身高（实测：高个子脚 85/差 58、普通 98/差 47、矮个子 114/差 45）。
+    feet_level = max(ys) - min(ys) <= 6 and all(10 <= y <= 250 for y in ys)   # 放到量化上限（游戏最矮~最高）
+    gap = [t - sum(ys) / len(ys) for t in torso]
+    return feet_level and all(10 <= g <= 200 for g in gap)
 
 
 def stand_legs(body):
@@ -201,7 +211,55 @@ def stand_legs(body):
 
 def stand(body):
     out = set_groups(stand_basic(body), _stand_groups())
-    return stand_legs(out) if out != body or not _feet_down(out) else out
+    out = stand_legs(out) if out != body or not _feet_down(out) else out
+    return normal_anim_rate(out)
+
+
+# 2026-11-16：动画速率/权重浮点（当前 0x21ddc20，历史块 0x1716a94 第 6 个）。真人与绝大多数录制都是 1.0；
+# 若录遇境时角色正好在播 0.25 倍的待机小动作，底帧会带着 0.25，之后所有表情都只放出前几帧。
+ANIM_RATE_ONE = bytes.fromhex("0000803f")
+ANIM_RATE_FIELDS = {("0x21ddc20", None), ("0x1716a94", 6)}
+
+
+def normal_anim_rate(body):
+    toks, labs = candle_pose.tokens(body), candle_pose.labels(body)
+    occ, changed = {}, False
+    for i, l in enumerate(labs):
+        occ[l] = occ.get(l, 0) + 1
+        t = toks[i]
+        if ((l, None) in ANIM_RATE_FIELDS or (l, occ[l]) in ANIM_RATE_FIELDS) and t.kind == "raw" \
+                and t.extent == 4 and bytes(t.value) != ANIM_RATE_ONE:
+            toks[i] = type(t)("raw", 4, ANIM_RATE_ONE)
+            changed = True
+    return candle_pose.write(toks) if changed else body
+
+
+# 2026-11-15：身体原点（Actor 原点）离脚底的高度随身高变。真机录制实测（遇境同一点）：
+#   脚骨骼 y 114 → 0.226 m，98 → 0.496，96 → 0.533，85 → 0.707，
+#   ≈ ORIGIN_PER_UNIT × (ORIGIN_ZERO_Y − 脚 y)。范围放宽到覆盖最矮/最高（体型 -3~3、身高 -1~16 档）。
+ORIGIN_PER_UNIT = 0.0166
+ORIGIN_ZERO_Y = 127.6
+ORIGIN_MIN, ORIGIN_MAX = 0.02, 2.0
+DEFAULT_ORIGIN = 0.5
+
+
+def body_origin_offset(body):
+    """站好的身体 → 身体原点离脚底多高（米）；看不出（没站好/数据异常）返回 None，调用方用 0.5。"""
+    if not body:
+        return None
+    try:
+        if not _feet_down(body):
+            return None
+        p = anim_pose.pose_values(body)
+    except Exception:
+        return None
+    ys = [v[1] for k, v in p.items() if k.split("|")[0] in FEET and len(v) == 3 and "|current|" in k]
+    if not ys:
+        ys = [v[1] for k, v in p.items() if k.split("|")[0] in FEET and len(v) == 3]
+    if not ys:
+        return None
+    value = ORIGIN_PER_UNIT * (ORIGIN_ZERO_Y - sum(ys) / len(ys))
+    return round(value, 3) if ORIGIN_MIN <= value <= ORIGIN_MAX else None
 
 
 def force(body, values):

@@ -26,6 +26,7 @@ for p in (APP, APP / "bot", APP / "escort-v31-server"):
 from qfsky.version_profile import CURRENT_BUILD, profile_for_build
 from qfsky.join0167_profile import account_binding
 from xg_gamedata import catalog_state
+from test_catalog_async14 import settled, wait_idle
 
 PROFILE = profile_for_build(CURRENT_BUILD)
 UUID = "11111111-1111-4111-8111-111111111111"
@@ -434,6 +435,7 @@ class WizardResetStateTests(FixtureCase):
 class RuntimeCatalogueStateTests(FixtureCase):
     def setUp(self):
         super().setUp()
+        wait_idle()
         catalog_state._CACHE.clear()
         self.folder = self.xg.ASSET_RELEASE / "asset-catalog-acct/fixture-a"
         self.manifest = self.folder / "manifest.json"
@@ -441,13 +443,13 @@ class RuntimeCatalogueStateTests(FixtureCase):
 
     def test_presence_without_runtime_validation_is_not_certified(self):
         with mock.patch.object(catalog_state, "_runtime_check", side_effect=ValueError("fixture_invalid")):
-            row = catalog_state.certify(self.data, "fixture-a", UUID, PROFILE)
+            row = settled(self.data, "fixture-a", UUID)
         self.assertFalse(row["certified"]); self.assertEqual(row["message"], catalog_state.REBUILD_MESSAGE)
 
     def test_old_catalog_build_rejected_without_loader(self):
         write_json(self.manifest, {"apk_build": 421589, "native_sha256": "legacy"})
         with mock.patch.object(catalog_state, "_runtime_check") as runtime:
-            row = catalog_state.certify(self.data, "fixture-a", UUID, PROFILE)
+            row = settled(self.data, "fixture-a", UUID)
         self.assertFalse(row["certified"]); self.assertEqual(row["state"], "stale"); runtime.assert_not_called()
 
     def test_real_child_process_rejects_legacy_manifest(self):
@@ -479,11 +481,11 @@ class RuntimeCatalogueStateTests(FixtureCase):
 
     def test_success_cached_only_until_any_output_changes(self):
         with mock.patch.object(catalog_state, "_runtime_check", return_value={"maps": 115, "variants": 2}) as runtime:
-            self.assertTrue(catalog_state.certify(self.data, "fixture-a", UUID, PROFILE)["certified"])
-            self.assertTrue(catalog_state.certify(self.data, "fixture-a", UUID, PROFILE)["certified"])
+            self.assertTrue(settled(self.data, "fixture-a", UUID)["certified"])
+            self.assertTrue(settled(self.data, "fixture-a", UUID)["certified"])
             self.assertEqual(runtime.call_count, 1)
             (self.folder / "changed.bin").write_bytes(b"changed")
-            self.assertTrue(catalog_state.certify(self.data, "fixture-a", UUID, PROFILE)["certified"])
+            self.assertTrue(settled(self.data, "fixture-a", UUID)["certified"])
             self.assertEqual(runtime.call_count, 2)
 
     def test_change_during_validation_is_not_certified(self):
@@ -491,7 +493,12 @@ class RuntimeCatalogueStateTests(FixtureCase):
             (self.folder / "new.bin").write_bytes(b"changed")
             return {"maps": 115, "variants": 2}
         with mock.patch.object(catalog_state, "_runtime_check", side_effect=mutate):
-            row = catalog_state.certify(self.data, "fixture-a", UUID, PROFILE)
+            first = catalog_state.certify(self.data, "fixture-a", UUID, PROFILE)
+            self.assertEqual(first["state"], "checking")
+            wait_idle()
+        # The changed fingerprint must not receive the old job's certificate.
+        with catalog_state._LOCK:
+            row = next(r for r in catalog_state._CACHE.values() if r["code"] == "catalog_changed_during_validation")
         self.assertFalse(row["certified"]); self.assertEqual(row["code"], "catalog_changed_during_validation")
 
     def test_subprocess_environment_does_not_mutate_parent(self):

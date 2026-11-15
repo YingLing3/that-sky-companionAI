@@ -505,6 +505,40 @@ class AnimEvent:
         return {"gen": self.gen, "key": self.key, "start": self.start or 0}
 
 
+# 2026-11-16 真人多帧录制（高个子号，招手/后空翻/跳舞）：一次性表情 mode 始终 0，
+# 播放期间 emote_hold=1；code90/f48/f70 开头约 0.2 s 由 7 渐入到 0/1，结尾约 0.35 s 由 1→4→7 渐出，
+# 最后 hold 回 0。原 mode 7 写法普通身高能播，高个子只出几帧。
+EMOTE_ONCE_IN = ((0.20, (0, 1)), (0.10, (3, 4)), (0.0, (7, 7)))
+EMOTE_ONCE_OUT = ((0.35, (1, 2)), (0.24, (4, 5)), (0.12, (7, 7)))   # 距结束剩余秒数 → 编码
+
+
+class EmoteOnceEvent(AnimEvent):
+    """一次性表情（按真人时间表）。stamp/gen/历史字段与 AnimEvent 一致。"""
+
+    def codes(self, now):
+        age = now - self.t0
+        if age >= self.seconds:
+            return False, (7, 7)
+        left = self.seconds - age
+        for at, value in EMOTE_ONCE_OUT[::-1]:
+            if left <= at:
+                return True, value
+        return True, next(value for at, value in EMOTE_ONCE_IN if age >= at)
+
+    def phase(self, now):
+        playing, (c90, _f) = self.codes(now)
+        return ("mode7" if playing else "idle"), c90
+
+    def post(self, body, now):
+        if self.start is None:
+            self.start = _required_clock(body)
+            self.t0 = now
+        playing, (c90, f) = self.codes(now)
+        return write(body, gen=self.gen, key=self.key, start=self.start, mode=0,
+                     code90=c90, code_f48=f, code_f70=f, emote_hold=1 if playing else 0, emote_state=0,
+                     h_gen=self.prev["gen"], h_key=self.prev["key"], h_start=self.prev["start"] >> 3)
+
+
 # 真人蝴蝶抓包：Enter 首帧后约 0.135 秒进入保持；Exit 的两个恢复边界。
 # 这些时间仅用于事件内部字段过渡，不会触发持续表情自动结束。
 EMOTE_ENTER_SECONDS = 0.135
