@@ -103,11 +103,11 @@ function captureView(cap, summary, error='') {
   const registered = !!registration && registration.scene === 'CandleSpace' && !!summary?.account
     && String(registration.account || '') === String(summary.account);
   const collecting = cap && ['starting','searching','waiting','recording','registering'].includes(cap.state);
-  if (resetNeeded(summary, 'capture') && !collecting) return {state:'waiting', title:'遇境采集未生成 · 等待重新采集', message:'清理后的旧录制状态不作为完成证明。请先生成游戏数据，再明确开始遇境采集。', detail:'账号、登录和聊天配置保留；不会自动采集。', progress:null};
   if (cap?.state === 'error' || cap?.last_error) {
     return {state:'error', title:'遇境采集异常', message:cap.last_error || cap.message || '请检查 MuMu 和游戏状态。',
       detail:registered || ready ? '之前的遇境录制已登记；本次采集出错，不需要逐张跑图。' : '只需要采集遇境，不需要去其他地图。', progress:null};
   }
+  if (resetNeeded(summary, 'capture') && !collecting) return {state:'waiting', title:'遇境采集未生成 · 等待重新采集', message:'清理后的旧录制状态不作为完成证明。请先生成游戏数据，再明确开始遇境采集。', detail:'账号、登录和聊天配置保留；不会自动采集。', progress:null};
   if (staleInfo && !collecting) {
     return {state:'error', title:'游戏已更新 · 需要重新录制遇境', message:staleInfo.message,
       detail:'旧版本的遇境录制不会再被使用；重新录到当前版本后会自动登记，只需遇境一张。', progress:null};

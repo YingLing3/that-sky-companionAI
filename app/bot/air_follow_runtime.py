@@ -92,8 +92,9 @@ def _snapshot(c,now):
         binding=(getattr(c,'map_id',None),tracker.room_generation,tracker.epoch,id(engine),
                  slot,slots[slot],incarnation)
         level=max((float(row[0]) for row in getattr(tracker,'level_changes',()) if len(row)>=2 and row[1]==slot),default=None)
+        body_origin=getattr(tracker,'body_origin',{}).get(slot)
         return dict(position=point,observed_at=observed,binding=binding,target=target,
-                    level_change=level),None
+                    level_change=level,body_origin=body_origin),None
     except (TypeError,ValueError,AttributeError,KeyError,OverflowError):return None,'target_snapshot_invalid'
     finally:lock.release()
 
@@ -126,7 +127,8 @@ def _observe(c,now,terrain,snapshot=None):
     if not state['lock'].acquire(blocking=False):return state.get('observation')
     try:
         observation=state['tracker'].observe(now,snapshot['position'],terrain,
-            binding=snapshot['binding'],observed_at=snapshot['observed_at'])
+            binding=snapshot['binding'],observed_at=snapshot['observed_at'],
+            target_origin=snapshot.get('body_origin'))
         state.update(observation=observation,snapshot=snapshot,binding=snapshot['binding'],terrain=terrain)
         return observation
     finally:state['lock'].release()

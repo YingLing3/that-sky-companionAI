@@ -236,9 +236,10 @@ def normal_anim_rate(body):
 
 # 2026-11-15：身体原点（Actor 原点）离脚底的高度随身高变。真机录制实测（遇境同一点）：
 #   脚骨骼 y 114 → 0.226 m，98 → 0.496，96 → 0.533，85 → 0.707，
-#   ≈ ORIGIN_PER_UNIT × (ORIGIN_ZERO_Y − 脚 y)。范围放宽到覆盖最矮/最高（体型 -3~3、身高 -1~16 档）。
-ORIGIN_PER_UNIT = 0.0166
-ORIGIN_ZERO_Y = 127.6
+#   2026-11-16 魔法变到游戏最矮 118 → 0.160，最高 62 → 1.101；
+#   六点最小二乘 ≈ ORIGIN_PER_UNIT × (ORIGIN_ZERO_Y − 脚 y)，最大误差 0.6 cm。
+ORIGIN_PER_UNIT = 0.01678
+ORIGIN_ZERO_Y = 127.52
 ORIGIN_MIN, ORIGIN_MAX = 0.02, 2.0
 DEFAULT_ORIGIN = 0.5
 

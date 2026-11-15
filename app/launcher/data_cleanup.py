@@ -283,6 +283,9 @@ class CleanupService:
         if len(parts)==4 and parts[0]=='game' and parts[2]=='catalog-inputs':
             # scene_inputs_build writes <Scene>.json and index.json here.
             return re.fullmatch(r'[A-Za-z0-9_-]+\.json',parts[3]) is not None
+        if len(parts)==2 and parts[0]=='hop-proofs':
+            # 2026-11-16: hop proof records written by the terrain hop worker.
+            return re.fullmatch(r'hop-[0-9a-f-]{36}\.json',parts[1]) is not None
         if len(parts)>=4 and parts[0]=='game' and parts[2]=='terrain':tail='/'.join(parts[3:])
         elif '/'.join(parts)==RELEASE+'/multimap-catalog.json':return True
         elif '/'.join(parts).startswith(RELEASE+'/assets/'):tail='assets/'+ '/'.join(parts[len(PurePosixPath(RELEASE).parts)+1:])
@@ -297,6 +300,9 @@ class CleanupService:
             r'assets(?:\.work)?/(?:all-scenes-v1|beamo-world-all-v1|beamo-navigation-all-v1)/(?:catalog|summary)\.json',
             r'assets(?:\.work)?/(?:all-scenes-v1|beamo-world-all-v1)/'+mapname+r'/build\.json',
             r'assets(?:\.work)?/(?:all-scenes-v1|beamo-world-all-v1)/'+mapname+r'/(?:static-world|initial-collision|render)/(?:manifest|runtime-manifest)\.json',
+            # 2026-11-16: per-map beamo manifests (often >1 MiB) and final assembled assets.
+            r'assets(?:\.work)?/beamo-world-all-v1/'+mapname+r'/beamo/manifest\.json',
+            r'assets/'+mapname+r'/(?:static-world|initial-collision|render)/(?:manifest|runtime-manifest)\.json',
             r'assets(?:\.work)?/(?:all-scenes-v1|beamo-navigation-all-v1)/'+mapname+r'/(?:navigation-layered-v2|nav-v3|reused-verified|attempts/[0-9]+)/nav-build(?:-[0-9a-f]{64})?\.json',
             r'assets\.work/beamo-navigation-all-v1/'+mapname+r'/nav-build\.json',
             r'assets/on-demand-navigation-v13/'+mapname+r'/descriptor\.json',

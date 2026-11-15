@@ -549,6 +549,14 @@ class RoomTracker:
                 if scan_seat:   # 完整解析较贵，每人每秒一次
                     actor_body = bytes(data[off + 5:off + 5 + size])
                     self._record_owner(slot, actor_body, now)
+                    # 每个人自己的身体原点离地高度（身高不同差很多）；只在站好时更新，飞/坐时沿用上次。
+                    try:
+                        body_origin = social_pose.body_origin_offset(actor_body)
+                    except Exception:
+                        body_origin = None
+                    if body_origin is not None:
+                        with self.lock:
+                            self.__dict__.setdefault("body_origin", {})[slot] = body_origin
                     st = anim_pose.social_state(actor_body)
                     seat_profile = None
                     if st is not None and st.get("seat"):

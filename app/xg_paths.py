@@ -389,10 +389,35 @@ def write_json(path, value, private_file: bool = True) -> Path:
     tmp = p.with_name(p.name + ".pending")
     Path(long_path(tmp)).write_text(json.dumps(value, ensure_ascii=False, sort_keys=True),
                                     encoding="utf-8")
-    os.replace(long_path(tmp), long_path(p))
+    _replace_retry(long_path(tmp), long_path(p))
     if private_file:
         private(p)
     return p
+
+
+def _replace_retry(src, dst, attempts=12, delay=0.05):
+    """Windows: 目标文件被另一个进程（杀软、索引、另一个小光实例）短暂占用时 os.replace
+    会报 WinError 5/32；短暂重试（最长约 2 秒），仍失败才抛出。"""
+    import time
+    for i in range(attempts):
+        try:
+            return os.replace(src, dst)
+        except PermissionError:
+            if i == attempts - 1:
+                break
+            time.sleep(delay * (1 + i))
+    # 兜底：有些杀毒软件会一直拦截 AppData 里的改名/替换，但允许直接写入。
+    # 此时改为就地覆盖写入目标文件（内容已完整写在 src 里），再删掉 src。
+    data = Path(src).read_bytes()
+    with open(dst, "r+b" if os.path.exists(dst) else "wb") as out:
+        out.write(data)
+        out.truncate()
+        out.flush()
+        os.fsync(out.fileno())
+    try:
+        os.remove(src)
+    except OSError:
+        pass
 
 
 def config() -> dict:

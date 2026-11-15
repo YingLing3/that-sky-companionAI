@@ -4,13 +4,13 @@ import json
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '1.0.5-desktop-ui.10.2-terrainfix.14'
+VERSION = '1.0.5-desktop-ui.10.2-terrainfix.15'
 
 class ReleaseVersionTests(unittest.TestCase):
     def test_build_version(self):
         doc = json.loads((ROOT/'BUILD.json').read_text(encoding='utf-8'))
         self.assertEqual(doc['release'], VERSION)
-        self.assertEqual(doc['client_revision'], 'r10.2-terrainfix.14')
+        self.assertEqual(doc['client_revision'], 'r10.2-terrainfix.15')
 
     def test_manifest_version(self):
         doc = json.loads((ROOT/'PACKAGE-MANIFEST.json').read_text(encoding='utf-8'))

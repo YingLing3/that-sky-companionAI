@@ -67,8 +67,10 @@ class StandingHeightTests(unittest.TestCase):
         self.assertFalse(social_pose._feet_down(body(150, 140)))
 
     def test_origin_offset_matches_measured_heights(self):
-        for feet, expected in ((114, 0.226), (98, 0.491), (85, 0.707)):
-            self.assertAlmostEqual(social_pose.body_origin_offset(body(feet, feet + 50)), expected, delta=0.01)
+        # 实测（遇境平地）：游戏最矮 118→0.160、矮 114→0.226、普通 98→0.496、高 85→0.707、游戏最高 62→1.101
+        for feet, torso, expected in ((118, 136, 0.160), (114, 159, 0.226), (98, 147, 0.496),
+                                      (85, 143, 0.707), (62, 131, 1.101)):
+            self.assertAlmostEqual(social_pose.body_origin_offset(body(feet, torso)), expected, delta=0.007)
 
     def test_origin_offset_out_of_range_or_not_standing_is_none(self):
         self.assertIsNone(social_pose.body_origin_offset(body(250, 255)))
@@ -122,6 +124,21 @@ class OwnerHeightTests(unittest.TestCase):
             obs = tr.observe(1.0, (0.0, 0.5, 0.0), self.Terrain(bot), binding="b", observed_at=1.0)
             self.assertAlmostEqual(obs["height_above"], 0.0, places=6, msg=str(bot))
             self.assertNotEqual(obs["mode"], "airborne")
+
+    def test_tallest_owner_standing_is_not_airborne(self):
+        # 游戏最高的主人站在地上：身体原点离地 1.101 m。带上他自己的身高就是 0 m 离地。
+        for bot in (0.16, 0.5, 1.1):
+            tr = air_follow.TargetTracker()
+            obs = None
+            for i in range(30):
+                obs = tr.observe(1.0 + i * .1, (0.0, 1.101, 0.0), self.Terrain(bot), binding="b",
+                                 observed_at=1.0 + i * .1, target_origin=1.101)
+            self.assertAlmostEqual(obs["height_above"], 0.0, places=6, msg=str(bot))
+            self.assertNotEqual(obs["mode"], "airborne")
+        # 不带身高（旧行为）会把他当成离地 0.6 m —— 这正是要修的情况。
+        tr = air_follow.TargetTracker()
+        obs = tr.observe(1.0, (0.0, 1.101, 0.0), self.Terrain(0.5), binding="b", observed_at=1.0)
+        self.assertAlmostEqual(obs["height_above"], 0.601, places=3)
 
 
 if __name__ == "__main__":

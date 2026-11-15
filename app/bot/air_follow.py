@@ -90,7 +90,7 @@ class TargetTracker:
         self.binding=None;self.samples=[];self.air_since=None;self.ground_since=None
         self.mode='unknown';self.velocity=(0.,0.,0.);self.heading=0.;self.last=None
 
-    def observe(self,now,point,terrain,binding=None,observed_at=None):
+    def observe(self,now,point,terrain,binding=None,observed_at=None,target_origin=None):
         p=_point(point)
         try:t=float(now);stamp=t if observed_at is None else float(observed_at)
         except (TypeError,ValueError,OverflowError):
@@ -121,9 +121,11 @@ class TargetTracker:
                     self.heading+=max(-math.pi*dt,min(math.pi*dt,delta))
         self.samples.append((stamp,p));self.samples=self.samples[-32:]
         ground=support_below(terrain,p)
-        # 被观察的是别人：离地高度按普通身高换算，不受小光自己身高影响（与改动前 0.5 时完全一致）。
+        # 被观察的是别人：离地高度按“这个人自己的身高”换算（从他的站姿骨骼算出；不知道时按普通身高 0.5），
+        # 不受小光自己身高影响。游戏最高的人站着身体原点离地约 1.1 m，按 0.5 算会被当成在飞。
         own=body_origin(terrain)
-        shift=0. if abs(own)<1e-6 else own-DEFAULT_BODY_ORIGIN   # 偏移 0 = 几何坐标地形，不换算
+        theirs=target_origin if isinstance(target_origin,(int,float)) and 0.<target_origin<=2.5 else DEFAULT_BODY_ORIGIN
+        shift=0. if abs(own)<1e-6 else own-theirs   # 偏移 0 = 几何坐标地形，不换算
         height=None if ground is None else p[1]-(ground-shift)
         hs=math.hypot(self.velocity[0],self.velocity[2])
         if height is None:

@@ -221,9 +221,11 @@ def _read_accounts(path: Path) -> list[dict]:
         raise GameDataError(
             "没有本机账号表（%s）。先在小光里登录/添加一个游戏号，再登记录制。" % path,
             "accounts_missing")
+    deleted = {str(x) for x in (doc.get("deleted_account_ids") or []) if isinstance(x, str)}
     rows = []
     for row in doc["accounts"]:
-        if isinstance(row, dict) and isinstance(row.get("user_uuid"), str):
+        # 已在登录服务删除/解绑的旧记录（tombstone）不参与认号，避免同号两条记录互相打架。
+        if isinstance(row, dict) and isinstance(row.get("user_uuid"), str) and str(row.get("id")) not in deleted:
             rows.append(row)
     if not rows:
         raise GameDataError("账号表里没有带 user_uuid 的号，先在启动器里登录游戏号。",
@@ -273,7 +275,7 @@ def _validate_record(folder: Path) -> dict:
     return record
 
 
-def _match_account(record: dict, accounts: list[dict]) -> dict:
+def _match_account(record: dict, accounts: list[dict], active: str | None = None) -> dict:
     binding = record["account_binding"]["value"]
     hits = []
     for row in accounts:
@@ -287,7 +289,12 @@ def _match_account(record: dict, accounts: list[dict]) -> dict:
             "这个录制不属于本机账号表里的任何一个号。先在启动器里登录录制时用的游戏号，"
             "或换一份这个号的录制。", "capture_account_unknown")
     if len(hits) > 1:
-        raise GameDataError("录制同时匹配到多个账号（账号表重复），先清理重复账号。",
+        # 同一个游戏号在本机账号表里有多条（例如重新登录后留下旧记录）：优先当前选中的号。
+        chosen = [row for row in hits if active and str(row.get("id")) == str(active)]
+        if len(chosen) == 1:
+            return chosen[0]
+        raise GameDataError("录制同时匹配到本机账号表里的多条记录（同一个游戏号登录过多次），"
+                            "且都不是当前选中的号。请在“游戏账号”里选中录制用的号后重新采集。",
                             "capture_account_ambiguous")
     return hits[0]
 
@@ -337,7 +344,11 @@ def register(folder: Path, data: Path, progress: Progress) -> dict:
     record = _validate_record(folder)
     accounts = _read_accounts(Path(xg.ACCOUNTS_JSON))
     progress.emit("按录制里的账号绑定认号…", done=1)
-    account = _match_account(record, accounts)
+    try:
+        active = Path(xg.ACTIVE_ACCOUNT).read_text(encoding="utf-8").strip() or None
+    except (OSError, AttributeError, ValueError):
+        active = None
+    account = _match_account(record, accounts, active)
     uuid = account["user_uuid"]
 
     profiles_root = Path(xg.CURRENT_PROFILES)
