@@ -153,7 +153,8 @@ class TerrainWrapperTests(unittest.TestCase):
             stream = io.StringIO()
             progress = Progress("terrain", 0, stream=stream)
             with patch.object(terrain, "ensure_pipeline"), patch.object(terrain, "inspect_apk"), \
-                 patch.object(terrain, "xg_paths", return_value=types.SimpleNamespace(short_path=short_path)), \
+                 patch.object(terrain, "xg_paths", return_value=types.SimpleNamespace(short_path=short_path,
+                     require_node_exe=lambda value=None: str(ROOT / "runtime/node/node.exe"))), \
                  patch.object(terrain.xg_exec, "popen", side_effect=popen):
                 reply = terrain.run(data / "fixture.apk", data, maps, existing, 1, progress)
             return reply, seen["command"], short_calls, [json.loads(line) for line in stream.getvalue().splitlines()]

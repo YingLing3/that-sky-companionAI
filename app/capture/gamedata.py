@@ -40,7 +40,7 @@ def env():
     e.update({"PYTHONPATH": os.pathsep.join(parts), "PYTHONUTF8": "1",
               "PYTHONIOENCODING": "utf-8", "SKY_AI_ROOT": str(xg_paths.ROOT),
               "XG_DATA_DIR": str(xg_paths.DATA)})
-    return e
+    return xg_paths.node_child_env(e)
 
 
 def python_exe():

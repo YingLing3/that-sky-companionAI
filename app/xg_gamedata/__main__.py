@@ -76,8 +76,10 @@ def cmd_props(args) -> int:
     from .common import Progress, game_dir, resolve_data
     progress = Progress("props", 1)
     output = Path(args.output) if args.output else game_dir(resolve_data(args.data)) / "props"
+    business_errors = (GameDataError,)
     try:
-        from .props import generate
+        from .props import generate, PropGenerationError
+        business_errors = (GameDataError, PropGenerationError)
         def report(event):
             if isinstance(event, dict):
                 progress.emit(str(event.get("msg") or event.get("message") or "生成道具形状"),
@@ -92,6 +94,10 @@ def cmd_props(args) -> int:
     except Exception as exc:
         code = str(getattr(exc, "code", "props_generation_failed"))
         message = "道具形状未生成，可在安装与资源页单独补生成；已有名称表与地形不受影响。"
+        if isinstance(exc, business_errors):
+            reason = exc.message if isinstance(exc, GameDataError) else str(exc)
+            if reason:
+                message += " 原因：" + reason
         if args.optional:
             final(True, kind="props", props={"ready": False, "state": "missing", "code": code},
                   warning=message, warning_code=code)
@@ -136,7 +142,9 @@ def main(argv=None) -> int:
             return cmd_status(args)
         raise GameDataError("未知子命令：%s" % args.func, "unknown_command")
     except GameDataError as exc:
-        final(False, error=exc.message, code=exc.code)
+        extra = {key: getattr(exc, key) for key in ("stage", "child_code", "members", "difference_count")
+                 if hasattr(exc, key)}
+        final(False, error=exc.message, code=exc.code, **extra)
         return 1
     except KeyboardInterrupt:
         final(False, error="已中断；重新运行同一命令可以续跑。", code="interrupted")

@@ -95,7 +95,7 @@ def load(path: Path | None = None, build: int | None = None) -> dict:
 
 
 def require_apk_evidence(pack: dict, *, native_sha256: str, apk_archive_directory_sha256: str,
-                         build: int) -> None:
+                         build: int, resource_identity_sha256: str | None = None) -> None:
     """核对落点包声明的版本证据与本次 APK 实算值；不一致时中文 fail-closed。"""
     if type(build) is not int or build not in PACKS:
         raise GameDataError("不支持的目录版本：%r" % (build,), "spawn_pack_version")
@@ -118,6 +118,13 @@ def require_apk_evidence(pack: dict, *, native_sha256: str, apk_archive_director
             "这个安装包不是 %s 档案，请重新拉取完整 base.apk。"
             % (str(declared_native)[:12], str(native_sha256)[:12], label),
             "spawn_pack_apk_mismatch")
+    if resource_identity_sha256 is not None:
+        expected = (PROFILES[build].get("resource_identity_sha256") or {}).get("catalog")
+        if (not expected or resource_identity_sha256 != expected
+                or declared_directory != PROFILES[build]["apk_directory_sha256"]):
+            raise GameDataError("落点包参考档位或已校验的 catalog 资源子集不一致。", "spawn_pack_apk_mismatch")
+        return
+    # No new subset proof: retain the original exact-directory gate for old callers.
     if declared_directory is not None and declared_directory != apk_archive_directory_sha256:
         raise GameDataError(
             "落点包的 APK 目录证据与本次 APK 不一致（包=%s…，APK=%s…）。"

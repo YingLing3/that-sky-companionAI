@@ -88,15 +88,16 @@
 <span class='wz-panel-icon' aria-hidden='true'><svg class='wz-icon'><use href='#wz-i-phone'></use></svg></span>
 <div class='wz-panel-heading'><span class='wz-eyebrow'>第 2 步 · 环境准备</span><h1>检查 MuMu</h1><p class='wz-panel-sub'>小光要在 MuMu 模拟器里读游戏画面和内存来录图。</p></div>
 </header>
-<p class='wz-note wz-lede'>需要：MuMu 12、<b>打开「手机 Root 权限」并重启模拟器</b>、在 MuMu 里装好光遇并登进遇境。</p>
+<p class='wz-note wz-lede'>需要：MuMu（Android 15，兼容旧版）、<b>打开「手机 Root 权限」并重启模拟器</b>、在 MuMu 里装好光遇并登进遇境。</p>
 <div class='wz-card'>
-<label class='wz-field'><span>adb.exe 路径（自动找不到时手填）</span><input id='wz-adb' autocomplete='off' spellcheck='false' placeholder='例如 D:&#92;GAME&#92;MuMuPlayer&#92;nx_device&#92;12.0&#92;shell&#92;adb.exe'></label>
+<label class='wz-field'><span>adb.exe 路径（自动找不到时手填）</span><input id='wz-adb' autocomplete='off' spellcheck='false' placeholder='例如 D:&#92;GAME&#92;MuMuPlayer&#92;nx_device&#92;15.0&#92;shell&#92;adb.exe'></label>
+<p class='wz-note'>路径只是示例，请按本机实际安装位置填写；留空自动查找。实例与端口从设备列表读取，无需照抄示例。</p>
 <div class='wz-actions'><button class='wz-btn primary' id='wz-mumu-check' type='button'>检查 MuMu</button></div>
 <div class='wz-result' id='wz-mumu-result' hidden role='status' aria-live='polite'></div>
 </div>
 <ol class='wz-tips'>
 <li>MuMu 设置 → 其他设置 → 打开「手机 Root 权限」，然后<b>重启模拟器</b>。</li>
-<li>MuMu 里装好光遇 0.16.7 / 421589，登录要给小光用的号，走进遇境。</li>
+<li>MuMu 里安装与当前客户端支持版本一致的光遇，登录要给小光用的号，走进遇境。</li>
 <li>如果杀毒软件拦 adb，把 MuMu 目录加进信任。</li>
 </ol>
 </section>

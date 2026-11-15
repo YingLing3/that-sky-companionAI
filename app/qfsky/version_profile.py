@@ -17,6 +17,10 @@ CURRENT_APK_RESOURCE_REVISION = "apk-v76318-421629"
 CURRENT_NATIVE_SHA256 = "0b18ecc44e873f6caa181e6bc49f14b7e07058888523e47db52a14b32077a7ed"
 CURRENT_APK_DIRECTORY_SHA256 = "b3bab17209ddacc225daa2eef932eefc6230ebaf7102331da523b7d95fc87555"
 
+# 当前资源身份按实际生成用途分组；整包目录摘要仅保留为参考证据。
+CURRENT_RESOURCE_IDENTITY_SCHEMA = 'xg-apk-resource-members-v1'
+CURRENT_RESOURCE_IDENTITY_SHA256 = {'catalog': '6365964fc49adeaf7d940220748504cf882e35bd3e7b42b275f49548dd5e0ae9', 'names': '369635c28191dbd42e514b81dd64e280e5f38a07c3fa6cab8eb30c9a75293c0b', 'props': 'cb54911cca3b57fa86236a4d195d289a76b97e27db076baa4d3e93381b5560f1', 'terrain': 'aa6ef26e793a4079d65c4abf70f2dd9041161fa73b97add8c373f10a9563eec2'}
+
 # 遇境（CandleSpace）的 map_id 不随版本变，但 0.16.8 重做了场景，
 # resource tag / NetVersion[0] 从 36851 变成 63789。它是版本档案的一部分，
 # 不允许在协议/目录代码里再写死。
@@ -52,6 +56,8 @@ PROFILES = {
         "home_level_id": HOME_LEVEL_ID,
         "home_resource_tag": LEGACY_HOME_RESOURCE_TAG,
         "home_netversion": LEGACY_HOME_NETVERSION,
+        "resource_identity_schema": None,
+        "resource_identity_sha256": {},
         "legacy": True,
     },
     CURRENT_BUILD: {
@@ -66,6 +72,8 @@ PROFILES = {
         "home_level_id": HOME_LEVEL_ID,
         "home_resource_tag": CURRENT_HOME_RESOURCE_TAG,
         "home_netversion": CURRENT_HOME_NETVERSION,
+        "resource_identity_schema": CURRENT_RESOURCE_IDENTITY_SCHEMA,
+        "resource_identity_sha256": dict(CURRENT_RESOURCE_IDENTITY_SHA256),
         "legacy": False,
     },
 }

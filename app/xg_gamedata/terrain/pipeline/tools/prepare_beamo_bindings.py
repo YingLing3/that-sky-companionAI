@@ -59,7 +59,7 @@ def prepare(apk, output, maps=None):
     if out.exists(): raise ValueError('output_already_exists')
     with zipfile.ZipFile(apk) as z:
         names=z.namelist()
-        if len(names)>500000 or len(names)!=len(set(names)):
+        if len(names)>500000:
             raise ValueError('archive_member_count_or_duplicates')
         members=set(names); native=verify_profile(z)
         available={m.group(1):name for name in names if (m:=re.fullmatch(

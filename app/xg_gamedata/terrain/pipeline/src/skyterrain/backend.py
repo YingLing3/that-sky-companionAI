@@ -22,6 +22,7 @@ for _p in Path(__file__).resolve().parents:
     if (_p/'xg_exec.py').is_file():
         sys.path.insert(0,str(_p));break
 import xg_exec  # noqa: E402
+import xg_paths  # noqa: E402
 from .integration import Decision,MotionSample,_number,_vector
 
 WORKER=Path(__file__).resolve().parents[2]/'engine/worker.mjs'
@@ -129,7 +130,7 @@ class RouteLease:
 
 class JsonlWorkerTransport:
     offline=True
-    def __init__(self,assets_root,*,node_executable='C:/Program Files/nodejs/node.exe',timeout=2.0,worker_profile='default',hop_enabled=False,hop_proof_directory=None):
+    def __init__(self,assets_root,*,node_executable=None,timeout=2.0,worker_profile='default',hop_enabled=False,hop_proof_directory=None):
         if worker_profile not in ('default',STAGED_PROFILE):raise ValueError('worker_profile')
         if type(hop_enabled) is not bool:raise ValueError('hop_enabled_boolean')
         if hop_enabled and (worker_profile!=STAGED_PROFILE or hop_proof_directory is None
@@ -140,6 +141,8 @@ class JsonlWorkerTransport:
         self._worker_profile=worker_profile
         self._worker=STAGED_WORKER if worker_profile==STAGED_PROFILE else WORKER
         self.assets_root=Path(assets_root)
+        if node_executable is None or str(node_executable).strip().lower() in ("","node","node.exe"):
+            node_executable=xg_paths.require_node_exe(node_executable)
         self.node=Path(node_executable)
         if not self.node.is_absolute() or self.node.name.lower() not in ('node','node.exe'):
             raise ValueError('absolute_node_executable_required')
@@ -217,13 +220,15 @@ class JsonlWorkerTransport:
 
     def _start(self):
         if self._proc is not None:return
+        node=xg_paths.require_node_exe(self.node)
         try:
             if not self._worker.is_file() or not self.node.is_file():raise ValueError('worker_missing')
             assets=self.assets_root.resolve(strict=True)
             if not assets.is_dir():raise ValueError('asset_root')
             env={key:os.environ[key] for key in ('SYSTEMROOT','WINDIR','TEMP','TMP','PATH','PATHEXT') if key in os.environ}
+            env['XG_NODE']=node
             flags=getattr(subprocess,'CREATE_NO_WINDOW',0)
-            args=[str(self.node),str(self._worker),'--assets',str(assets),'--offline']
+            args=[node,str(self._worker),'--assets',str(assets),'--offline']
             if self.hop_enabled:args+=['--hop-proofs',str(self.hop_proof_directory)]
             proc=xg_exec.popen(args,
                                stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,

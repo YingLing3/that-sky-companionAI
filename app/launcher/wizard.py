@@ -868,7 +868,9 @@ def check_apk(path):
     r = gamedata.run(["check-apk", "--apk", str(p)], timeout=1800)
     final = r.get("final") or {}
     if not r.get("ok"):
-        return {"ok": False, "message": final.get("message") or final.get("error") or "APK 校验没通过"}
+        return {"ok": False, "message": final.get("message") or final.get("error") or "APK 校验没通过",
+                **{key: final[key] for key in ("code", "members", "difference_count", "stage", "child_code")
+                   if key in final}}
     okv, why = _version_ok(final)
     if not okv:
         return {"ok": False, "message": why, "detail": final}

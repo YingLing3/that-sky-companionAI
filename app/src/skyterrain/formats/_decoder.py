@@ -8,11 +8,12 @@ for _p in Path(__file__).resolve().parents:
     if (_p/'xg_exec.py').is_file():
         sys.path.insert(0,str(_p));break
 import xg_exec  # noqa: E402
+import xg_paths  # noqa: E402
 from ._types import DEFAULT_LIMITS, FormatError, MissingDecoderError
 
 class NodeMeshoptDecoder:
     def __init__(self, node_executable, module_path, *, timeout=30, max_output=DEFAULT_LIMITS.max_uncompressed_bytes):
-        self.node_executable=str(node_executable)
+        self.node_executable=node_executable
         self.module_path=Path(module_path).resolve(strict=True)
         self.timeout=timeout
         self.max_output=max_output
@@ -24,11 +25,12 @@ class NodeMeshoptDecoder:
             raise FormatError('meshopt_bridge_size_limit')
         if len(compressed)>DEFAULT_LIMITS.max_file_bytes:
             raise FormatError('meshopt_bridge_input_limit')
+        node = xg_paths.require_node_exe(self.node_executable)
         with tempfile.TemporaryDirectory(prefix='skyterrain-meshopt-') as folder:
             path=Path(folder)/'input.bin'
             path.write_bytes(compressed)
             try:
-                result=xg_exec.run([self.node_executable,str(self.bridge),str(self.module_path),
+                result=xg_exec.run([node,str(self.bridge),str(self.module_path),
                                     str(vertex_count),str(stride),str(path)],capture_output=True,
                                    timeout=self.timeout,check=False)
             except (OSError,subprocess.TimeoutExpired) as exc:

@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import uuid
 import zipfile
+from .apk_identity import validate_apk_members
 
 BUILD = 421629
 VERSION = '0.16.8'
@@ -69,11 +70,15 @@ def validate_generated(output_dir, expected_build=None):
 def _build(apk, scratch, progress):
     from .prop_build.extract import build_all_index
     from .prop_build.budget import extend
-    from .prop_build.rules import POLICY
-    progress(dict(stage='hash',message='正在校验 APK 来源'))
-    stat=apk.stat();identity=dict(sha256=_sha(apk),bytes=stat.st_size)
-    if identity['sha256']!=POLICY['apk_sha256']:
-        raise PropGenerationError('unsupported_apk_geometry_policy','当前 APK 不匹配已审核道具规则，保留现有道具数据')
+    progress(dict(stage='validate',message='正在校验 APK 原生库与道具资源子集'))
+    stat=apk.stat()
+    checked=validate_apk_members(apk, consumers=('props',), expected_build=BUILD)
+    progress(dict(stage='hash',message='正在记录 APK 来源指纹（不作渠道准入条件）'))
+    identity=dict(sha256=_sha(apk),bytes=stat.st_size,native_sha256=checked['native_sha256'],
+        build=checked['build'],version=checked['version'],identity_mode=checked['identity_mode'],
+        resource_identity_sha256=checked['resource_identity_sha256'],consumer_sha256=checked['consumer_sha256'],
+        apk_archive_directory_sha256=checked['apk_archive_directory_sha256'],
+        reference_apk_archive_directory_sha256=checked['reference_apk_archive_directory_sha256'])
     with zipfile.ZipFile(apk) as z:
         if len(z.infolist())>100000:raise PropGenerationError('apk_entry_budget')
         build_all_index(z,identity,scratch/'all',primary_index=scratch/'catalog.json',progress=progress)
@@ -216,7 +221,11 @@ def generate(apk_path,output_dir=None,*,progress=None):
         warnings.extend(['仅渲染主网格候选；非原生碰撞认证，运行时仍受姿态、缩放、误差和总预算门限制。',
             '其余道具按歧义、动画、未验证部件或几何预算等原因保持禁用。'])
         marker=dict(schema=SCHEMA,status='complete',build=BUILD,version=VERSION,apk_sha256=identity['sha256'],
-            counts=counts,ready=counts['ready'],known=counts['known'],catalog_sha256=catalog_sha,warnings=warnings)
+            counts=counts,ready=counts['ready'],known=counts['known'],catalog_sha256=catalog_sha,warnings=warnings,
+            native_sha256=identity.get('native_sha256'),resource_identity_sha256=identity.get('resource_identity_sha256'),
+            apk_archive_directory_sha256=identity.get('apk_archive_directory_sha256'),
+            reference_apk_archive_directory_sha256=identity.get('reference_apk_archive_directory_sha256'),
+            identity_mode=identity.get('identity_mode'))
         _write(publish/'generation.json',marker)
         callback(dict(stage='verify',message='正在校验全部运行时分片'))
         checked=validate_generated(publish,expected_build=BUILD)
@@ -226,10 +235,11 @@ def generate(apk_path,output_dir=None,*,progress=None):
         try:callback(dict(stage='complete',**counts))
         except Exception:warnings.append('完成进度回调失败；完整目录已成功提交。')
         return dict(ok=True,catalog=str(target/'catalog.json'),schema=index['schema'],**counts,counts=counts,
-            source_apk_sha256=identity['sha256'],warnings=warnings)
+            source_apk_sha256=identity['sha256'],resource_identity_sha256=identity.get('resource_identity_sha256'),
+            native_sha256=identity.get('native_sha256'),identity_mode=identity.get('identity_mode'),warnings=warnings)
     except PropGenerationError:raise
     except Exception as exc:
-        raise PropGenerationError('props_generation_failed',str(exc)) from exc
+        raise PropGenerationError(getattr(exc,'code','props_generation_failed'),str(exc)) from exc
     finally:
         try:
             if workspace is not None:_remove_tree(workspace,target.parent)

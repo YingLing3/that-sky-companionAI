@@ -1,8 +1,15 @@
 """Build local, auditable map assets from an explicitly selected APK. No game I/O."""
 from __future__ import annotations
-import argparse, hashlib, json, os, re, shutil, tempfile, zipfile
+import argparse, hashlib, json, os, re, shutil, sys, tempfile, zipfile
 from pathlib import Path, PurePosixPath
 from collections import Counter
+# Direct script invocation must not depend on cwd/PYTHONPATH.
+if not __package__:
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]));__package__='skyterrain'
+for _parent in Path(__file__).resolve().parents:
+    if (_parent/'xg_paths.py').is_file():
+        sys.path.insert(0,str(_parent));break
+import xg_paths
 import numpy as np
 from .formats import read_mesh, read_meshes, NodeMeshoptDecoder, DEFAULT_LIMITS, FormatError
 from .scene import Scene
@@ -28,25 +35,32 @@ def save_json(path,obj):atomic(path,json.dumps(obj,ensure_ascii=False,indent=2,a
 
 def build_map(apk, map_name, output, *, node, meshopt, profile=None):
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',map_name):raise ValueError('invalid_map_name')
+    node=xg_paths.require_node_exe(node)
     output=Path(os.path.abspath(os.fspath(output)));os.makedirs(output,exist_ok=True)
     decoder=NodeMeshoptDecoder(node,meshopt)
     sources={};cache={}
     with zipfile.ZipFile(apk) as z:
         names=z.namelist()
-        if len(names)!=len(set(names)):raise FormatError('duplicate_archive_members')
+        if profile is None and len(names)!=len(set(names)):raise FormatError('duplicate_archive_members')
+        # Unprofiled generic readers remain strict; profiled client reads below
+        # are protected by the central consumed-resource duplicate/inventory gate.
         if profile is not None:
             from .baked_terrain import PROFILE,ELF_SHA256
             if profile!=PROFILE:raise ValueError('unsupported_native_profile')
+            for parent_path in Path(__file__).resolve().parents:
+                if (parent_path/'xg_exec.py').is_file():
+                    if str(parent_path) not in sys.path:sys.path.insert(0,str(parent_path))
+                    break
+            from xg_gamedata.apk_identity import validate_apk_members
+            identity=validate_apk_members(z,consumers=('terrain',),expected_build=421629)
             member='lib/arm64-v8a/libBootloader.so';info=z.getinfo(member)
             if info.file_size>DEFAULT_LIMITS.max_file_bytes:raise FormatError('native_profile_file_budget')
-            digest=hashlib.sha256();count=0
-            with z.open(info) as f:
-                while block:=f.read(1024*1024):
-                    count+=len(block)
-                    if count>DEFAULT_LIMITS.max_file_bytes:raise FormatError('native_profile_file_budget')
-                    digest.update(block)
-            if count!=info.file_size or digest.hexdigest()!=ELF_SHA256:raise FormatError('native_profile_binary_mismatch')
-            sources[member]={'bytes':count,'sha256':digest.hexdigest(),'crc32':f'{info.CRC:08x}','native_profile_verified':True}
+            if identity['native_sha256']!=ELF_SHA256:raise FormatError('native_profile_binary_mismatch')
+            sources[member]={'bytes':info.file_size,'sha256':identity['native_sha256'],
+                'crc32':f'{info.CRC:08x}','native_profile_verified':True,
+                'resource_identity_sha256':identity['resource_identity_sha256'],
+                'apk_archive_directory_sha256':identity['apk_archive_directory_sha256'],
+                'identity_mode':identity['identity_mode']}
         def load(member):
             info=z.getinfo(member)
             if info.is_dir() or info.file_size>DEFAULT_LIMITS.max_file_bytes:raise FormatError('archive_member_budget')
@@ -119,9 +133,12 @@ def build_map(apk, map_name, output, *, node, meshopt, profile=None):
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--apk',required=True,type=Path);p.add_argument('--map',required=True,dest='map_name')
-    p.add_argument('--out',required=True,type=Path);p.add_argument('--node',default=shutil.which('node') or 'node')
+    p.add_argument('--out',required=True,type=Path);p.add_argument('--node',default=None)
     p.add_argument('--profile',help='Explicit native version profile; required for baked collision projection')
     p.add_argument('--meshopt',type=Path,default=Path(__file__).resolve().parents[2]/'engine/node_modules/meshoptimizer/meshopt_decoder.mjs')
-    a=p.parse_args(argv);print(json.dumps(build_map(a.apk,a.map_name,a.out,node=a.node,meshopt=a.meshopt,profile=a.profile),ensure_ascii=False,indent=2))
+    a=p.parse_args(argv)
+    try:a.node=xg_paths.require_node_exe(a.node)
+    except xg_paths.NodeResolutionError as exc:p.error(f'{exc.code}: {exc.message}')
+    print(json.dumps(build_map(a.apk,a.map_name,a.out,node=a.node,meshopt=a.meshopt,profile=a.profile),ensure_ascii=False,indent=2))
 
 if __name__=='__main__':main()

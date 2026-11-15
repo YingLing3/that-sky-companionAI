@@ -100,16 +100,22 @@ def _zip_read(z, member, budget=MAX_MEMBER):
 
 
 def verify_profile(z):
-    info = z.getinfo('lib/arm64-v8a/libBootloader.so')
-    if info.is_dir() or info.file_size > MAX_MEMBER: raise ValueError('native_profile_size')
-    digest = hashlib.sha256(); count = 0
-    with z.open(info) as stream:
-        while block := stream.read(1024 * 1024):
-            count += len(block)
-            if count > MAX_MEMBER: raise ValueError('native_profile_size')
-            digest.update(block)
-    if count != info.file_size or digest.hexdigest() != ELF_SHA256: raise ValueError('native_profile_sha_mismatch')
-    return {'member': info.filename, 'bytes': count, 'sha256': digest.hexdigest()}
+    # Use the actual native bytes plus precisely consumed terrain members.
+    # APK signing/channel/order changes are not a terrain identity change.
+    for parent in Path(__file__).resolve().parents:
+        if (parent/'xg_exec.py').is_file():
+            if str(parent) not in sys.path:sys.path.insert(0,str(parent))
+            break
+    from xg_gamedata.apk_identity import validate_apk_members
+    identity=validate_apk_members(z,consumers=('terrain',),expected_build=421629)
+    info=z.getinfo('lib/arm64-v8a/libBootloader.so')
+    if info.is_dir() or info.file_size>MAX_MEMBER:raise ValueError('native_profile_size')
+    if identity['native_sha256']!=ELF_SHA256:raise ValueError('native_profile_sha_mismatch')
+    return {'member':info.filename,'bytes':info.file_size,'sha256':identity['native_sha256'],
+            'resource_identity_sha256':identity['resource_identity_sha256'],
+            'apk_archive_directory_sha256':identity['apk_archive_directory_sha256'],
+            'reference_apk_archive_directory_sha256':identity['reference_apk_archive_directory_sha256'],
+            'identity_mode':identity['identity_mode']}
 
 
 def _safe_file(root, name):

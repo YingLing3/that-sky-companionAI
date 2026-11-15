@@ -12,6 +12,7 @@ for _p in Path(__file__).resolve().parents:
         sys.path.insert(0, str(_p))
         break
 import xg_exec  # noqa: E402
+import xg_paths  # noqa: E402
 from skyterrain.baked_terrain import PROFILE
 from skyterrain.catalog import Catalog, scene_hash
 from skyterrain.cli import save_json
@@ -202,10 +203,7 @@ def validate_navigation(report_path, info, name):
 
 
 def builder_identity(node):
-    resolved = shutil.which(str(node))
-    if resolved is None:
-        raise ValueError('node_executable_missing')
-    executable = Path(resolved).resolve()
+    executable = Path(xg_paths.require_node_exe(node))
     h = hashlib.sha256()
     with executable.open('rb') as f:
         while block := f.read(1024 * 1024):
@@ -224,12 +222,13 @@ def builder_identity(node):
 
 
 def run_worker(node, asset, attempt):
+    node=xg_paths.require_node_exe(node)
     started = time.monotonic()
     with (attempt / 'stdout.log').open('xb') as stdout, (attempt / 'stderr.log').open('xb') as stderr:
         try:
             proc = xg_exec.run([node, str(BUILDER), '--asset', asset, '--out', str(attempt)],
                                   cwd=ROOT, stdout=stdout, stderr=stderr, timeout=TIMEOUT,
-                                  env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'), check=False)
+                                  env=dict(os.environ, XG_NODE=node, PYTHONDONTWRITEBYTECODE='1'), check=False)
             result = {'exit_code': proc.returncode, 'timed_out': False}
         except subprocess.TimeoutExpired:
             result = {'exit_code': 124, 'timed_out': True}
@@ -334,6 +333,7 @@ def build_one(world_root, out, row, base_row, previous, node):
 
 
 def build_batch(world_summary, base_catalog, output, *, node, maps=None, workers=2, resume=False):
+    node=xg_paths.require_node_exe(node)
     if type(workers) is not int or workers not in (1, 2):
         raise ValueError('workers_must_be_1_or_2')
     world_summary, base_catalog = Path(world_summary).resolve(), Path(base_catalog).resolve()
@@ -402,11 +402,13 @@ def main(argv=None):
     parser.add_argument('--world-summary', required=True, type=Path)
     parser.add_argument('--base-catalog', required=True, type=Path)
     parser.add_argument('--out', required=True, type=Path)
-    parser.add_argument('--node', required=True)
+    parser.add_argument('--node', default=None)
     parser.add_argument('--maps', nargs='+')
     parser.add_argument('--workers', type=int, default=2)
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args(argv)
+    try:args.node=xg_paths.require_node_exe(args.node)
+    except xg_paths.NodeResolutionError as exc:parser.error(f"{exc.code}: {exc.message}")
     result = build_batch(args.world_summary, args.base_catalog, args.out, node=args.node,
                          maps=args.maps, workers=args.workers, resume=args.resume)
     return 0 if all(r['status'] in ('built_offline', 'reuse_base', 'not_selected') for r in result['rows']) else 1

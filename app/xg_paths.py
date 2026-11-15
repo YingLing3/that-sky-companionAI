@@ -23,7 +23,7 @@ SKY_AI_ROOT   代码/运行根（服务器默认 <server-data-root>）
 XG_DATA_DIR   用户数据根（默认 = ROOT）
 XG_GAME_VERSION  游戏数据版本目录名（默认 0.16.8-421629；旧数据可显式设 0.16.7-421589）
 XG_PYTHON     跑子进程用的解释器（默认 ROOT/.venv/bin/python，没有就用 sys.executable）
-XG_NODE       Node 可执行文件（默认 PATH 里的 node）
+XG_NODE       显式 Node 覆盖；默认优先物理安装目录的 runtime/node/node.exe，再找 PATH
 XG_RELEASE    覆盖 RELEASE
 XG_SUPERVISOR 覆盖 supervisor 脚本路径
 XG_PILOT_CONFIG 覆盖地形引擎 pilot config
@@ -34,11 +34,15 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import threading
+import time
 import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------- 基本根
 APP = Path(__file__).resolve().parent          # 程序目录（安装版 app\）
+INSTALL_ROOT = APP.parent                     # 只随本模块物理位置，不随代码/数据环境变化
 ROOT = Path(os.environ.get("SKY_AI_ROOT") or APP.parent)
 DATA = Path(os.environ.get("XG_DATA_DIR") or ROOT)
 
@@ -136,18 +140,151 @@ def python_exe() -> str:
     return sys.executable
 
 
-def node_exe() -> str:
-    """Node 可执行文件；找不到返回空串（调用方要如实报“缺 Node”）。"""
-    env = os.environ.get("XG_NODE")
-    if env:
-        return env
-    found = shutil.which("node")
+NODE_MIN_MAJOR = 20
+_NODE_VERSION_CACHE = {}
+_NODE_PROBE_LOCK = threading.Lock()
+_NODE_EXEC = None
+
+
+def _node_exec():
+    """Load the shared Windows-safe runner without relying on desktop sys.path."""
+    global _NODE_EXEC
+    if _NODE_EXEC is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_xg_node_exec", APP / "xg_exec.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _NODE_EXEC = module
+    return _NODE_EXEC
+
+
+
+class NodeResolutionError(RuntimeError):
+    """Stable safe diagnostics shared by runtime, generators and UI."""
+    def __init__(self, code, message):
+        self.code, self.message = code, message
+        super().__init__(message)
+
+
+def _probe_node_version(path):
+    """Probe once per file identity; no per-tick --version subprocesses."""
+    try:
+        info = path.stat()
+        key = (os.path.normcase(str(path)), info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    except OSError as exc:
+        raise NodeResolutionError("node_unusable", "Node 可执行文件无法读取，请检查安装目录或显式设置。") from exc
+    with _NODE_PROBE_LOCK:
+        cached = _NODE_VERSION_CACHE.get(key)
+        now = time.monotonic()
+        if cached and (cached[0] == "version" or now - cached[2] < 5):
+            kind, value, _ = cached
+            if kind == "error":
+                raise NodeResolutionError(*value)
+            return value
+        try:
+            result = _node_exec().run([str(path), "--version"], capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace", timeout=3,
+                                    creationflags=0x08000000 if os.name == "nt" else 0)
+            version = (result.stdout or "").strip()
+            match = re.fullmatch(r"v?(\d+)\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?", version)
+            if result.returncode != 0 or not match:
+                raise NodeResolutionError("node_unusable", "Node 无法正常运行或版本输出无效，请重新解压客户端或检查显式设置。")
+            value = (int(match.group(1)), version)
+            _NODE_VERSION_CACHE[key] = ("version", value, now)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            value = ("node_unusable", "Node 无法启动或版本检查超时，请重新解压客户端或检查显式设置。")
+            _NODE_VERSION_CACHE[key] = ("error", value, now)
+            raise NodeResolutionError(*value) from exc
+        except NodeResolutionError as exc:
+            _NODE_VERSION_CACHE[key] = ("error", (exc.code, exc.message), now)
+            raise
+        finally:
+            while len(_NODE_VERSION_CACHE) > 32:
+                _NODE_VERSION_CACHE.pop(next(iter(_NODE_VERSION_CACHE)))
+        return value
+
+
+def _checked_node(value, *, override=False, search_path=None):
+    text = os.fspath(value).strip().strip('"')
+    path = Path(text).expanduser()
+    # An explicitly named command may be resolved on the supplied PATH; concrete
+    # paths are never silently substituted with another installation.
+    if not path.is_absolute() and len(path.parts) == 1 and "/" not in text and "\\" not in text:
+        found = shutil.which(text, path=search_path)
+        if found:
+            path = Path(found)
+    try:
+        if not path.is_file():
+            # The shipped launcher pins this managed path even when the package
+            # is incomplete. Do not mislabel it as a user's custom override.
+            managed = os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+                os.path.abspath(INSTALL_ROOT / "runtime/node/node.exe"))
+            custom = override and not managed
+            raise NodeResolutionError(
+                "node_invalid_override" if custom else "node_missing",
+                "显式指定的 Node 路径无效；请修正或清除 XG_NODE / --node 设置。"
+                if custom else "安装包不完整，未找到可用 Node.js；请重新解压完整客户端（含 runtime/node）。")
+        path = path.resolve()
+    except (OSError, ValueError) as exc:
+        raise NodeResolutionError("node_invalid_override" if override else "node_missing",
+                                  "Node 路径无效，请检查安装目录或显式设置。") from exc
+    major, version = _probe_node_version(path)
+    if major < NODE_MIN_MAJOR:
+        raise NodeResolutionError("node_version_unsupported",
+                                  "需要 Node.js 20 或更高版本，当前为 %s；请使用随包 Node 或修正显式设置。" % version)
+    return str(path)
+
+
+def _resolve_node(value=None, *, environment=None):
+    environment = os.environ if environment is None else environment
+    search_path = environment.get("PATH", "")
+    text = os.fspath(value).strip() if value is not None else ""
+    if text and text.casefold() not in ("node", "node.exe"):
+        return _checked_node(text, override=True, search_path=search_path)
+    override = environment.get("XG_NODE")
+    if override and str(override).strip():
+        return _checked_node(str(override), override=True, search_path=search_path)
+    # This root is deliberately independent of SKY_AI_ROOT, XG_DATA_DIR and cwd.
+    bundled = INSTALL_ROOT / "runtime/node/node.exe"
+    if bundled.is_file():
+        return _checked_node(bundled)
+    found = shutil.which("node", path=search_path)
     if found:
-        return found
-    for cand in (ROOT / "runtime/node/node.exe", RELEASE.parent / "node/node.exe"):
-        if cand.is_file():
-            return str(cand)
-    return ""
+        return _checked_node(found)
+    # Retain historical server layouts only after the documented desktop order.
+    for candidate in (ROOT / "runtime/node/node.exe", RELEASE.parent / "node/node.exe",
+                      ROOT / "runtime/node/bin/node", RELEASE.parent / "node/bin/node"):
+        if candidate.is_file():
+            return _checked_node(candidate)
+    raise NodeResolutionError("node_missing",
+                              "安装包不完整，未找到可用 Node.js；请重新解压完整客户端（含 runtime/node）。")
+
+
+def require_node_exe(value=None) -> str:
+    """Resolve placeholders centrally; validate explicit paths without fallback."""
+    return _resolve_node(value)
+
+
+def node_exe() -> str:
+    """Compatibility API: absolute usable Node path, or an empty string."""
+    try:
+        return require_node_exe()
+    except NodeResolutionError:
+        return ""
+
+
+def node_child_env(environment=None) -> dict:
+    """Pin a valid absolute Node for children without blocking a Node-free UI.
+
+    A bad explicit override remains intact so the eventual consumer reports its
+    true error. Missing Node is not replaced by a guessed executable string.
+    """
+    result = dict(os.environ if environment is None else environment)
+    try:
+        result["XG_NODE"] = _resolve_node(environment=result)
+    except NodeResolutionError:
+        pass
+    return result
 
 
 def ensure_dirs() -> None:

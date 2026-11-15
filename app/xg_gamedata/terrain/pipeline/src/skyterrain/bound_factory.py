@@ -1,6 +1,6 @@
 """Offline-only cold factory binding a scene to bounded, hash-verified local assets.
 
-No process is started here. Pass this callable to TerrainSession(..., mode='offline').
+No terrain worker is started here; default Node discovery may probe its version. Pass this callable to TerrainSession(..., mode='offline').
 foot_offset is mandatory caller evidence/test input, NOT a calibration assertion.
 Default behavior is unchanged. The explicit preserving_imported_nav profile also
 binds a staged_navigation report and imported binary; missing pins never fall back.
@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from numbers import Real
 import copy,hashlib,json,math,os,re,stat
 from .backend import JsonlWorkerTransport,WorkerBackend,WorkerError,WORKER,STAGED_WORKER,STAGED_PROFILE
+import xg_paths
 from .integration import Decision
 from .catalog import scene_hash
 from .session import SceneScope
@@ -344,6 +345,8 @@ class BoundBackendFactory:
     offline_only=True
     def __init__(self,asset_root,*,engine_root,node_executable,foot_offset,limits=None,navigation_window=None,worker_profile='default'):
         if worker_profile not in ('default',STAGED_PROFILE):raise BindingError('worker_profile')
+        if node_executable is None or str(node_executable).strip().lower() in ("","node","node.exe"):
+            node_executable=xg_paths.require_node_exe(node_executable)
         for name,value in (('asset_root',asset_root),('engine_root',engine_root),('node_executable',node_executable)):
             if not Path(value).is_absolute():raise BindingError('absolute_'+name+'_required')
         try:

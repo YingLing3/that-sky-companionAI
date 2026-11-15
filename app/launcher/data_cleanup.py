@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+import errno
 import hashlib
 import json
 import os
@@ -32,6 +33,8 @@ ACCOUNT_FOLDER = re.compile(r'(?:[A-Za-z0-9_-]{1,80}|\.[tb][0-9a-f]{8})\Z')
 MAGIC = 'xiaoguang-generated-data-cleanup-v1'
 MANIFEST = '.xg-cleanup.json'
 INDEX = '.xg-cleanup-index.json'
+SCAN_LIMIT=1024*1024
+COPY_CHUNK=1024*1024
 MAX_JSON = 32 * 1024 * 1024
 SENSITIVE = re.compile(r'(?i)(?:^|[_.\- ])(?:secrets?|credentials?|passwords?|passwd|passphrase|'
     r'tokens?|cookies?|sessions?|session3|login|accounts?|ai[_-]?keys?|api[_-]?keys?|'
@@ -41,7 +44,7 @@ SECRET_KEYS = frozenset(('password','passwd','passphrase','secret','secrets','cr
     'logintoken','token','cookie','cookies','authorization','privatekey','session','session3','sessionkey',
     'owneruuid','ownerbinding','persona','personas','memory','chatmemory','chat history','accounts'))
 EXTENSIONS = frozenset(('.json','.bin','.f32','.u32','.i32','.f64','.u16','.u8','.nav','.navmesh',
-    '.mesh','.npz','.npy','.gz','.zst','.obj','.mtl','.dat'))
+    '.mesh','.npz','.npy','.gz','.zst','.obj','.mtl','.dat','.apk'))
 TEXT_FILES = frozenset(('sha256sums','sha256sums.txt','build.txt','status.txt'))
 
 
@@ -194,7 +197,7 @@ class _Spans:
 
 
 class CleanupService:
-    def __init__(self, data_root, *, is_online, is_busy, clock=time.time, preview_ttl=120):
+    def __init__(self, data_root, *, is_online, is_busy, clock=time.time, preview_ttl=120, progress=None):
         root=Path(data_root)
         if not root.is_absolute() or root == Path(root.anchor):
             _reject('invalid_data_root','data 根必须是明确的绝对目录')
@@ -203,11 +206,102 @@ class CleanupService:
         self.ttl=max(1,min(int(preview_ttl),300))
         self.is_online,self.is_busy=is_online,is_busy
         self._plans={}
+        self.progress=progress
         self._lock=threading.RLock()
         self._check_path(root)
         if not root.is_dir():
             _reject('invalid_data_root','data 根不存在')
         self.root=root.resolve()
+
+    def set_progress(self, callback):
+        # The API uses one job slot and sets this before entering a core method.
+        with self._lock:self.progress=callback
+
+    def _emit(self, phase, message, files_done=0, files_total=None, bytes_done=0, bytes_total=None):
+        if self.progress:
+            try:self.progress(dict(phase=phase,message=message,files_done=files_done,
+                                  files_total=files_total,bytes_done=bytes_done,bytes_total=bytes_total))
+            except Exception:pass  # UI telemetry must never abort a transaction.
+
+    @staticmethod
+    def _check_entry(info):
+        if stat.S_ISLNK(info.st_mode) or getattr(info,'st_file_attributes',0)&0x400:
+            _reject('unsafe_link','路径包含符号链接、junction 或 reparse point')
+        if stat.S_ISREG(info.st_mode) and info.st_nlink>1:_reject('unsafe_link','路径包含硬链接')
+
+    @staticmethod
+    def _safe_relative(value, dot=False):
+        if value=='.' and dot:return True
+        if not isinstance(value,str) or not value or any(c in value for c in '\\:<>"|?*'):return False
+        parts=value.split('/')
+        return all(p and p not in ('.','..') and not p.endswith((' ','.')) and
+                   not re.fullmatch(r'(?i)(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?',p)
+                   and not any(ord(c)<32 for c in p) for p in parts)
+
+    @staticmethod
+    def _matches(current, expected, *, subset=False, partial=False):
+        # v1 full hashes on large files are deliberately NOT reread. Metadata
+        # cannot detect same-size/same-mtime changes; small hashes remain strict.
+        if not isinstance(expected,list):return False
+        wanted={r[0]:r for r in expected}
+        if not subset and len(current)!=len(expected):return False
+        for row in current:
+            old=wanted.get(row[0])
+            if old is None or row[1]!=old[1]:return False
+            if row[1]=='dir':
+                if not subset and row[:4]!=old[:4]:return False
+            elif partial:
+                if row[2]>old[2]:return False
+            elif row[:4]!=old[:4] or (row[2]<=SCAN_LIMIT and row[4]!=old[4]):return False
+        return True
+
+    @staticmethod
+    def _apk_allowed(relative):
+        # APK caches are eligible only in the existing terrain generation roots.
+        # Other categories keep their original unknown-file refusal unchanged.
+        parts=PurePosixPath(relative).parts
+        if parts[:1]==('trash',):parts=parts[2:]
+        if len(parts)>=3 and parts[0]=='game' and VERSION.fullmatch(parts[1]):
+            return parts[2]=='terrain'
+        rel='/'.join(parts)
+        return any(rel==RELEASE+'/'+name or rel.startswith(RELEASE+'/'+name+'/')
+                   for name in ('assets','terrain'))
+
+    @staticmethod
+    def _large_json_allowed(relative):
+        # Name/path inventory from the local generators, not an all-JSON bypass.
+        # Payloads >1 MiB have metadata-only assurance, including these files.
+        # Atomic writers may leave the same known artifact with one terminal
+        # .pending suffix. Normalize only that suffix, never its parent path.
+        if relative.endswith('.pending'):relative=relative[:-len('.pending')]
+        parts=PurePosixPath(relative).parts
+        if parts[:1]==('trash',):parts=parts[2:]
+        if len(parts)>=4 and parts[0]=='game' and parts[2]=='props':
+            tail=parts[3:]
+            return tail==('catalog.json',) or (len(tail)==3 and tail[:2]==('all','runtime') and
+                re.fullmatch(r'[A-Za-z0-9_-]+\.json',tail[2]) is not None)
+        if len(parts)==4 and parts[0]=='game' and parts[2]=='catalog-inputs':
+            # scene_inputs_build writes <Scene>.json and index.json here.
+            return re.fullmatch(r'[A-Za-z0-9_-]+\.json',parts[3]) is not None
+        if len(parts)>=4 and parts[0]=='game' and parts[2]=='terrain':tail='/'.join(parts[3:])
+        elif '/'.join(parts)==RELEASE+'/multimap-catalog.json':return True
+        elif '/'.join(parts).startswith(RELEASE+'/assets/'):tail='assets/'+ '/'.join(parts[len(PurePosixPath(RELEASE).parts)+1:])
+        elif '/'.join(parts).startswith(RELEASE+'/terrain/'):tail='/'.join(parts[len(PurePosixPath(RELEASE).parts)+1:])
+        else:return False
+        mapname=r'[A-Za-z0-9_-]+'
+        patterns=(
+            r'(?:multimap-catalog|build-summary)\.json',
+            r'assets(?:\.work)?/(?:catalog|build-summary)\.json',
+            r'assets\.work/(?:bindings|\.bindings-[0-9]+-[0-9]+)/(?:bindings|summary|prior-registry)\.json',
+            r'assets\.work/(?:bindings|\.bindings-[0-9]+-[0-9]+)/scenes/'+mapname+r'\.json',
+            r'assets(?:\.work)?/(?:all-scenes-v1|beamo-world-all-v1|beamo-navigation-all-v1)/(?:catalog|summary)\.json',
+            r'assets(?:\.work)?/(?:all-scenes-v1|beamo-world-all-v1)/'+mapname+r'/build\.json',
+            r'assets(?:\.work)?/(?:all-scenes-v1|beamo-world-all-v1)/'+mapname+r'/(?:static-world|initial-collision|render)/(?:manifest|runtime-manifest)\.json',
+            r'assets(?:\.work)?/(?:all-scenes-v1|beamo-navigation-all-v1)/'+mapname+r'/(?:navigation-layered-v2|nav-v3|reused-verified|attempts/[0-9]+)/nav-build(?:-[0-9a-f]{64})?\.json',
+            r'assets\.work/beamo-navigation-all-v1/'+mapname+r'/nav-build\.json',
+            r'assets/on-demand-navigation-v13/'+mapname+r'/descriptor\.json',
+        )
+        return any(re.fullmatch(pattern,tail) for pattern in patterns)
 
     def _check_path(self,path):
         path=Path(path)
@@ -223,7 +317,7 @@ class CleanupService:
                 _reject('unsafe_link','路径包含硬链接')
 
     def _path(self,relative):
-        if not isinstance(relative,str) or '\\' in relative or ':' in relative:
+        if not self._safe_relative(relative):
             _reject('unsafe_path')
         parts=PurePosixPath(relative).parts
         if not parts or any(p in ('','.','..') for p in parts) or relative.startswith('/'):
@@ -247,8 +341,12 @@ class CleanupService:
 
     def _read(self,path):
         self._check_path(path)
-        with path.open('rb') as stream:
-            return stream.read(MAX_JSON+1)
+        # Only our own journals need the larger cap. Private mixed documents
+        # are never read beyond the small-text budget.
+        managed=path.name in (MANIFEST,INDEX) and path.is_relative_to(self.root/'trash')
+        limit=MAX_JSON if managed else SCAN_LIMIT
+        if path.stat().st_size>limit:_reject('json_too_large','登记文本过大，保留原文件并拒绝修改')
+        with path.open('rb') as stream:return stream.read(limit+1)
 
     def _atomic(self,path,raw):
         self._check_path(path)
@@ -304,38 +402,49 @@ class CleanupService:
                     found.append(('catalog',RELEASE+'/asset-catalog-acct/'+path.name))
         return [(category,rel) for category,rel in found if self._path(rel).exists()]
 
-    def _tree(self,rel,*,check_sensitive=True):
-        base=self._path(rel)
-        rows=[]
+    def _tree(self,rel,*,sensitivity=True,policy_rel=None,partial=False):
+        base=self._path(rel);rows=[];files=0;size=0
+        self._emit('inventory','正在按目录元数据扫描')
         def visit(path):
-            self._check_path(path)
-            info=path.lstat()
+            nonlocal files,size
+            info=path.lstat();self._check_entry(info)
             local=path.relative_to(base).as_posix()
-            if check_sensitive and (SENSITIVE.search(path.name) or path.name.lower() in ('.env','config.json','settings.json')):
-                _reject('sensitive_data','候选子树含受保护文件，整项拒绝',str(path.relative_to(self.root)))
+            if not self._safe_relative(local,dot=True):_reject('unsafe_path')
+            name=path.name.lower()
+            if sensitivity and (SENSITIVE.search(name) or name in ('.env','config.json','settings.json')):
+                _reject('sensitive_data','所选目录含敏感文件名',rel)
             if stat.S_ISDIR(info.st_mode):
                 rows.append([local,'dir',0,info.st_mtime_ns])
-                for child in sorted(path.iterdir()):visit(child)
+                for child in sorted(path.iterdir(),key=lambda p:p.name):visit(child)
             elif stat.S_ISREG(info.st_mode):
                 suffix=path.suffix.lower()
                 if suffix=='.pending':suffix=Path(path.stem).suffix.lower()
-                if check_sensitive and suffix not in EXTENSIONS and path.name.lower() not in TEXT_FILES:
-                    _reject('unknown_generated_file','候选子树含非白名单文件，整项拒绝',str(path.relative_to(self.root)))
-                digest=hashlib.sha256()
-                carry=b''
-                with path.open('rb') as stream:
-                    while chunk:=stream.read(1024*1024):
-                        digest.update(chunk)
-                        if check_sensitive and (re.search(rb'-----BEGIN [A-Z ]*PRIVATE KEY-----',carry+chunk)
-                            or re.search(rb'(?i)["\x27](?:api[_-]?key|password|passwd|session3|access[_-]?token|refresh[_-]?token|private[_-]?key)["\x27]\s*:',carry+chunk)):
-                            _reject('sensitive_data','候选子树含敏感内容，整项拒绝')
-                        carry=chunk[-256:]
-                if check_sensitive and suffix=='.json':
-                    if _secret(_json(self._read(path))):
-                        _reject('sensitive_data','候选JSON含受保护字段，整项拒绝',str(path.relative_to(self.root)))
-                rows.append([local,'file',info.st_size,info.st_mtime_ns,digest.hexdigest()])
-            else:_reject('unsafe_file_type')
+                if ((suffix=='.apk' and not self._apk_allowed(policy_rel or rel)) or
+                    (suffix not in EXTENSIONS and name not in TEXT_FILES)):
+                    _reject('unknown_generated_file','所选目录含非生成文件',rel)
+                digest=None
+                if info.st_size<=SCAN_LIMIT:
+                    if info.st_size:
+                        with path.open('rb') as stream:raw=stream.read(SCAN_LIMIT+1)
+                    else:raw=b''
+                    if len(raw)!=info.st_size:_reject('preview_stale')
+                    if sensitivity:
+                        if (re.search(rb'-----BEGIN [A-Z ]*PRIVATE KEY-----',raw) or
+                            re.search(rb'(?i)["\x27](?:api[_-]?key|password|passwd|session3|access[_-]?token|refresh[_-]?token|private[_-]?key)["\x27]\s*:',raw)):
+                            _reject('sensitive_data','所选目录含敏感内容',rel)
+                        if not partial and suffix=='.json' and _secret(_json(raw)):_reject('sensitive_data',path=rel)
+                    digest=_digest(raw)
+                elif suffix=='.json' or name in TEXT_FILES or suffix in ('.obj','.mtl'):
+                    logical=(PurePosixPath(policy_rel or rel)/(local if local!='.' else '')).as_posix()
+                    if suffix!='.json' or not self._large_json_allowed(logical):
+                        _reject('large_text_unverified','未知大文本未读取，拒绝纳入清理',rel)
+                after=path.lstat();self._check_entry(after)
+                if (after.st_size,after.st_mtime_ns)!=(info.st_size,info.st_mtime_ns):_reject('preview_stale')
+                rows.append([local,'file',info.st_size,info.st_mtime_ns,digest]);files+=1;size+=info.st_size
+                if files%128==0:self._emit('inventory','正在按目录元数据扫描',files,None,size,None)
+            else:_reject('unsafe_file_type',path=rel)
         visit(base)
+        self._emit('inventory','目录元数据扫描完成',files,files,size,size)
         return rows
 
     def _mixed_item(self,kind,paths):
@@ -501,20 +610,45 @@ class CleanupService:
         if not isinstance(batchid,str) or not BATCH.fullmatch(batchid):_reject('untrusted_trash')
         path=self._path('trash/'+batchid+'/'+MANIFEST)
         doc=_json(self._read(path))
-        if (not isinstance(doc,dict) or set(doc)!={'magic','batch_id','root_hash','created_at','status','selection','items'}
+        if (not isinstance(doc,dict) or set(doc) not in ({'magic','batch_id','root_hash','created_at','status','selection','items'}, {'magic','batch_id','root_hash','created_at','status','selection','items','fingerprint_version'})
             or doc.get('magic')!=MAGIC or doc.get('batch_id')!=batchid or _secret(doc)
             or doc.get('root_hash')!=_digest(str(self.root).encode()) or not isinstance(doc.get('items'),list)
             or doc.get('status') not in ('moving','trashed','partial','restoring','partial_restore','restored','purging')
             or not isinstance(doc.get('selection'),dict) or set(doc['selection']) not in (set(CATEGORIES),LEGACY_CATEGORIES)
             or any(type(x)is not bool for x in doc['selection'].values())):_reject('untrusted_trash')
+        if doc.get('fingerprint_version',1) not in (1,2):_reject('untrusted_trash')
         # v1 的四类回收记录仍可恢复；新类别缺省关闭，不扩大旧批次范围。
         doc['selection']={key:doc['selection'].get(key,False) for key in CATEGORIES}
         for item in doc['items']:
+            if not isinstance(item,dict) or type(item.get('files')) is not int or type(item.get('bytes')) is not int or item['files']<0 or item['bytes']<0:_reject('untrusted_trash')
             expected={'category','path','action','fingerprint','bytes','files','state'}
             if item.get('action')=='json_members':expected|={'kind','fragments'}
+            if 'transfer' in item:
+                if item.get('action')!='move':_reject('untrusted_trash')
+                expected.add('transfer')
             if set(item)!=expected or item.get('state') not in ('planned','pending','stored','restore_pending','restored'):_reject('untrusted_trash')
             if item.get('action')=='move':
-                if not self._allowed(item.get('path',''),item.get('category')):_reject('untrusted_trash')
+                if not self._allowed(item.get('path',''),item.get('category')) or not self._safe_relative(item['path']):_reject('untrusted_trash')
+                rows=item.get('fingerprint');seen=set()
+                if not isinstance(rows,list) or not rows:_reject('untrusted_trash')
+                for row in rows:
+                    if (not isinstance(row,list) or len(row) not in (4,5) or not self._safe_relative(row[0],dot=True)
+                        or row[0].casefold() in seen or row[1] not in ('dir','file')
+                        or type(row[2]) is not int or row[2]<0 or type(row[3]) is not int):_reject('untrusted_trash')
+                    seen.add(row[0].casefold())
+                    if row[1]=='dir':
+                        if len(row)!=4 or row[2]!=0:_reject('untrusted_trash')
+                    elif len(row)!=5 or not ((isinstance(row[4],str) and re.fullmatch('[0-9a-f]{64}',row[4])) or
+                        (row[4] is None and doc.get('fingerprint_version')==2 and row[2]>SCAN_LIMIT)):_reject('untrusted_trash')
+                by_name={r[0]:r for r in rows}
+                for row in rows[1:]:
+                    parent=PurePosixPath(row[0]).parent.as_posix()
+                    if parent not in by_name or by_name[parent][1]!='dir':_reject('untrusted_trash')
+                if rows[0][0]!='.' or item['files']!=sum(r[1]=='file' for r in rows) or item['bytes']!=sum(r[2] for r in rows):_reject('untrusted_trash')
+                if 'transfer' in item:
+                    tr=item['transfer']
+                    if (not isinstance(tr,dict) or set(tr)!={'direction','id'} or tr['direction'] not in ('out','back')
+                        or not isinstance(tr['id'],str) or re.fullmatch('[0-9a-f]{32}',tr['id']) is None):_reject('untrusted_trash')
             elif item.get('action')=='json_members':
                 kind=item.get('kind')
                 if kind not in MIXED or item.get('path')!=MIXED[kind] or not isinstance(item.get('fragments'),list):_reject('untrusted_trash')
@@ -539,7 +673,7 @@ class CleanupService:
     def _verify_item(self,item):
         path=self._path(item['path'])
         if item['action']=='move':
-            if not path.exists() or self._tree(item['path'])!=item['fingerprint']:_reject('preview_stale','目录、大小或内容已变化，请重新预览')
+            if not path.exists() or not self._matches(self._tree(item['path']),item['fingerprint']):_reject('preview_stale','目录、大小或内容已变化，请重新预览')
         else:
             if not path.is_file():_reject('preview_stale')
             info=path.stat();raw=self._read(path)
@@ -554,7 +688,7 @@ class CleanupService:
                 batchid=time.strftime('%Y%m%dT%H%M%S',time.localtime(self.clock()))+'-'+uuid.uuid4().hex[:16]
                 folder=self._path('trash/'+batchid);folder.mkdir()
                 doc={'magic':MAGIC,'batch_id':batchid,'root_hash':_digest(str(self.root).encode()),
-                     'created_at':self.clock(),'status':'moving','selection':dict(plan['selection']),
+                     'created_at':self.clock(),'fingerprint_version':2,'status':'moving','selection':dict(plan['selection']),
                      'items':json.loads(json.dumps(plan['items']))}
                 for item in doc['items']:item['state']='planned'
                 self._save_batch(doc)
@@ -568,7 +702,7 @@ class CleanupService:
                             target=self._path('trash/'+batchid+'/'+item['path']);target.parent.mkdir(parents=True,exist_ok=True)
                             self._check_path(target)
                             if target.exists():_reject('trash_conflict')
-                            os.rename(source,target)
+                            self._move(doc,item,source,target,'out')
                         else:
                             raw=self._read(source)
                             updated=_Spans(raw).remove([f['path'] for f in item['fragments']])
@@ -593,6 +727,90 @@ class CleanupService:
                         'items':[self._public_item(x) for x in doc['items']],'total_bytes':sum(x['bytes'] for x in doc['items'])}
         return self._guard(run)
 
+    def _transfer_paths(self,doc,item):
+        original=self._path(item['path']);archived=self._path('trash/'+doc['batch_id']+'/'+item['path'])
+        source,target=(original,archived) if item['transfer']['direction']=='out' else (archived,original)
+        stage=target.with_name('.xg-transfer-'+item['transfer']['id']+'-'+target.name)
+        self._check_path(stage)
+        return source,target,stage
+
+    def _copy_rows(self,source,target,rows,*,missing=False):
+        done=0;size=0;total=sum(r[2] for r in rows);count=sum(r[1]=='file' for r in rows)
+        self._state();next_check=time.monotonic()+0.5
+        def check_state():
+            nonlocal next_check
+            now=time.monotonic()
+            if now>=next_check:self._state();next_check=now+0.5
+        for row in rows:
+            check_state();src=source/(row[0] if row[0]!='.' else '');dst=target/(row[0] if row[0]!='.' else '')
+            self._check_entry(src.lstat());self._check_path(dst)
+            if row[1]=='dir':dst.mkdir(exist_ok=missing)
+            elif not (missing and dst.exists()):
+                with src.open('rb') as reader,dst.open('xb') as writer:
+                    remaining=row[2]
+                    while remaining:
+                        check_state();chunk=reader.read(min(COPY_CHUNK,remaining))
+                        if not chunk:raise OSError('copy source shortened')
+                        writer.write(chunk);remaining-=len(chunk);size+=len(chunk)
+                        self._emit('copy','跨卷分块复制中',done,count,size,total)
+                    if reader.read(1):raise OSError('copy source grew')
+                    writer.flush();os.fsync(writer.fileno())
+                os.utime(dst,ns=(row[3],row[3]))
+            if row[1]=='file':done+=1
+        for row in reversed(rows):
+            if row[1]=='dir':os.utime(target/(row[0] if row[0]!='.' else ''),ns=(row[3],row[3]))
+        self._state()
+        self._emit('copy','跨卷副本计数与大小校验',count,count,total,total)
+
+    def _remove_rows(self,base,rows):
+        for row in reversed(rows):
+            path=base/(row[0] if row[0]!='.' else '')
+            self._check_path(path)
+            if row[1]=='dir':path.rmdir()
+            else:path.unlink()
+
+    def _move(self,doc,item,source,target,direction):
+        self._emit('move','正在同卷重命名',0,item['files'],0,item['bytes'])
+        if target.exists():_reject('restore_conflict')
+        try:os.rename(source,target)
+        except OSError as error:
+            if error.errno!=errno.EXDEV and getattr(error,'winerror',None)!=17:raise
+        else:
+            rows=self._tree(target.relative_to(self.root).as_posix(),policy_rel=item['path'])
+            if not self._matches(rows,item['fingerprint']):_reject('move_changed','重命名后计数、大小或元数据变化，保留现场供恢复')
+            self._emit('move','同卷重命名完成',item['files'],item['files'],item['bytes'],item['bytes']);return
+        item['transfer']={'direction':direction,'id':uuid.uuid4().hex};self._save_batch(doc)
+        source,target,stage=self._transfer_paths(doc,item)
+        self._copy_rows(source,stage,item['fingerprint'])
+        for path in (source,stage):
+            rows=self._tree(path.relative_to(self.root).as_posix(),policy_rel=item['path'])
+            if not self._matches(rows,item['fingerprint']):_reject('copy_changed')
+        if target.exists():_reject('restore_conflict')
+        self._state();os.rename(stage,target)
+        # The full verified copy remains until all source entries are removed.
+        self._state();self._remove_rows(source,item['fingerprint'])
+        del item['transfer'];self._save_batch(doc)
+
+    def _recover_transfer(self,doc,item):
+        self._emit('rollback','恢复未完成的跨卷迁移')
+        source,target,stage=self._transfer_paths(doc,item)
+        expected=item['fingerprint']
+        if target.exists():
+            rows=self._tree(target.relative_to(self.root).as_posix(),policy_rel=item['path'])
+            if not self._matches(rows,expected):_reject('restore_conflict')
+            existing=self._tree(source.relative_to(self.root).as_posix(),policy_rel=item['path']) if source.exists() else []
+            if not self._matches(existing,expected,subset=True):_reject('restore_conflict')
+            self._copy_rows(target,source,expected,missing=True)
+            if not self._matches(self._tree(source.relative_to(self.root).as_posix(),policy_rel=item['path']),expected):_reject('restore_conflict')
+            self._remove_rows(target,rows)
+        else:
+            if not source.exists() or not self._matches(self._tree(source.relative_to(self.root).as_posix(),policy_rel=item['path']),expected):_reject('restore_conflict')
+        if stage.exists():
+            rows=self._tree(stage.relative_to(self.root).as_posix(),policy_rel=item['path'],partial=True)
+            if not self._matches(rows,expected,subset=True,partial=True):_reject('restore_conflict')
+            self._remove_rows(stage,rows)
+        del item['transfer'];self._save_batch(doc)
+
     def _archive(self,doc):
         batch='trash/'+doc['batch_id'];allowed={MANIFEST};rows=[]
         for item in doc['items']:
@@ -600,21 +818,30 @@ class CleanupService:
             rel=batch+'/'+item['path'];path=self._path(rel)
             if not path.exists():continue
             current=self._tree(rel)
-            if doc['status']=='purging':
-                expected={row[0]:row for row in item['fingerprint']}
-                # A confirmed permanent-delete may have stopped midway. Missing
-                # entries are expected; extra/changed remaining files are not.
-                if any(row[0] not in expected or (row[1]=='file' and row!=expected[row[0]])
-                       or row[1]!=expected[row[0]][1] for row in current):_reject('trash_changed')
-            elif current!=item['fingerprint']:_reject('trash_changed','回收内容发生变化，拒绝恢复/删除')
+            if not self._matches(current,item['fingerprint'],subset=doc['status']=='purging' or 'transfer' in item):
+                _reject('trash_changed','回收内容发生变化，拒绝恢复/删除')
             for row in current:
                 member=PurePosixPath(item['path'])/(row[0] if row[0]!='.' else '')
                 allowed.add(member.as_posix())
                 allowed.update(p.as_posix() for p in member.parents if str(p)!='.')
+        for item in doc['items']:
+            if 'transfer' not in item:continue
+            source,target,stage=self._transfer_paths(doc,item)
+            for location,partial in ((source,False),(target,False),(stage,True)):
+                if not location.exists():continue
+                rel=location.relative_to(self.root).as_posix()
+                current=self._tree(rel,policy_rel=item['path'],partial=partial)
+                if not self._matches(current,item['fingerprint'],subset=True,partial=partial):_reject('trash_changed')
+                for row in current:
+                    member=location/(row[0] if row[0]!='.' else '')
+                    rows.append(['transfer:'+member.relative_to(self.root).as_posix(),*row[1:4]])
+                    if member.is_relative_to(self.root/batch):
+                        m=member.relative_to(self.root/batch);allowed.add(m.as_posix())
+                        allowed.update(p.as_posix() for p in m.parents if str(p)!='.')
         folder=self._path(batch)
         for current,dirs,files in os.walk(folder,followlinks=False):
             for name in dirs+files:
-                path=Path(current)/name;self._check_path(path)
+                path=Path(current)/name;self._check_entry(path.lstat())
                 rel=path.relative_to(folder).as_posix()
                 if rel not in allowed:
                     # Empty structural parents can remain after successful restore.
@@ -625,6 +852,8 @@ class CleanupService:
 
     def _restore_doc(self,doc,*,rollback=False):
         self._archive(doc)
+        for item in doc['items']:
+            if 'transfer' in item:self._recover_transfer(doc,item)
         # Preflight every destination before moving anything back.
         operations=[]
         for item in reversed(doc['items']):
@@ -637,7 +866,7 @@ class CleanupService:
                     operations.append((item,source,dest,None))
                 elif item.get('state') in ('stored','pending'):
                     # Crash after a restore rename but before its journal commit.
-                    if not dest.exists() or self._tree(item['path'])!=item['fingerprint']:_reject('restore_conflict','恢复源缺失')
+                    if not dest.exists() or not self._matches(self._tree(item['path']),item['fingerprint']):_reject('restore_conflict','恢复源缺失')
             else:
                 if not dest.is_file():_reject('restore_conflict','混合登记文件缺失，不重建凭据配置')
                 spans=_Spans(self._read(dest))
@@ -655,7 +884,7 @@ class CleanupService:
                 if source:
                     dest.parent.mkdir(parents=True,exist_ok=True);self._check_path(dest)
                     if dest.exists():_reject('restore_conflict')
-                    os.rename(source,dest)
+                    self._move(doc,item,source,dest,'back')
                 else:
                     # Recompute immediately before writing; unrelated fields remain current.
                     updated=_Spans(self._read(dest)).restore(item['fragments'],allow_existing=rollback or previous_state in ('planned','restore_pending'))
@@ -697,6 +926,7 @@ class CleanupService:
     def purge_preview(self):
         def run():
             docs=[self._batch(x) for x in self._index()['batches']]
+            if any('transfer' in i for d in docs for i in d['items']):_reject('transfer_incomplete','跨卷迁移未完成，请先恢复上次清理')
             signatures={d['batch_id']:self._archive(d) for d in docs}
             if not docs:_reject('nothing_to_purge','没有本服务创建的回收记录')
             token,plan=self._plan('purge',signatures=signatures)
@@ -716,7 +946,8 @@ class CleanupService:
                 self._state();index=self._index()
                 for batchid,signature in plan['signatures'].items():
                     if batchid not in index['batches'] or self._archive(self._batch(batchid))!=signature:_reject('preview_stale')
-                removed=[]
+                removed=[];files_done=0;bytes_done=0
+                self._emit('purge','正在删除已确认回收内容')
                 for batchid in plan['signatures']:
                     self._state();folder=self._path('trash/'+batchid)
                     doc=self._batch(batchid);self._archive(doc)
@@ -727,9 +958,10 @@ class CleanupService:
                             for name in files:
                                 path=Path(current)/name
                                 if path.name==MANIFEST:continue
-                                self._check_path(path);path.unlink()
+                                self._check_entry(path.lstat());bytes_done+=path.stat().st_size;path.unlink();files_done+=1
+                                if files_done%128==0:self._emit('purge','正在删除已确认回收内容',files_done,None,bytes_done,None)
                             for name in dirs:
-                                path=Path(current)/name;self._check_path(path);path.rmdir()
+                                path=Path(current)/name;self._check_entry(path.lstat());path.rmdir()
                         self._check_path(folder/MANIFEST);(folder/MANIFEST).unlink();folder.rmdir()
                         removed.append(batchid);index['batches'].remove(batchid);self._write_doc(self._path('trash/'+INDEX),index)
                     except OSError:

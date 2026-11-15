@@ -14,6 +14,7 @@ from pathlib import Path
 from .common import (APK_BUILD, APK_PACKAGE, APK_VERSION, GameDataError, Progress,
                      atomic_json, final, human_size, long_path, sha256_file)
 from qfsky.version_profile import PROFILES as VERSION_PROFILES
+from .apk_identity import validate_apk_members
 import xg_exec
 
 # 国服 0.16.8 / 421629 与 0.16.7 / 421589 的资产身份。
@@ -36,73 +37,43 @@ def archive_directory_sha(zf: zipfile.ZipFile) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def inspect_apk(apk: Path, progress: Progress | None = None) -> dict:
-    """完整校验；失败抛 GameDataError（中文）。成功返回身份信息。"""
+def inspect_apk(apk: Path, progress: Progress | None = None, *, consumers=None, expected_build=None) -> dict:
+    """Native 主识别；按实际生成用途校验资源子集，整包摘要只记录不作渠道门。"""
     apk = Path(apk).expanduser().resolve()
     if not apk.is_file():
         raise GameDataError("APK 不存在：%s" % apk, "apk_missing")
     if apk.stat().st_size < 1024 * 1024:
         raise GameDataError("这个文件太小，不像光遇安装包：%s" % apk, "apk_too_small")
     if progress:
-        progress.emit("读取 APK 目录…", done=0)
+        progress.emit("读取 APK 目录与关键资源…", done=0)
     try:
         with zipfile.ZipFile(apk) as zf:
             names = set(zf.namelist())
             if "AndroidManifest.xml" not in names:
-                raise GameDataError("不是 Android 安装包（缺 AndroidManifest.xml）。",
-                                    "apk_not_android")
+                raise GameDataError("不是 Android 安装包（缺 AndroidManifest.xml）。", "apk_not_android")
             if "resources.arsc" not in names:
-                raise GameDataError("安装包里没有 resources.arsc，可能是 split 或损坏的副本。",
-                                    "apk_no_resources")
+                raise GameDataError("安装包缺 resources.arsc，可能是 split 或损坏副本。", "apk_no_resources")
             if NATIVE_MEMBER not in names:
-                raise GameDataError(
-                    "安装包缺少 %s：请拉取完整的 base.apk（不是只有 split）。" % NATIVE_MEMBER,
-                    "apk_no_native")
+                raise GameDataError("安装包缺少 %s，请使用完整 base.apk。" % NATIVE_MEMBER, "apk_no_native")
             if SCENE_MEMBER not in names:
-                raise GameDataError(
-                    "安装包里没有 CandleSpace 场景（assets/Data/Levels/...）："
-                    "这不是光遇国服完整安装包。", "apk_no_scene")
-            directory_sha = archive_directory_sha(zf)
-            native_sha = sha256_file_from_zip(zf, NATIVE_MEMBER)
+                raise GameDataError("安装包缺 CandleSpace 场景，请使用完整 base.apk。", "apk_no_scene")
+            identity = validate_apk_members(zf, expected_build=expected_build,
+                                            **({"consumers": consumers} if consumers is not None else {}))
     except zipfile.BadZipFile:
-        raise GameDataError("APK 打不开（zip 结构损坏）：%s" % apk, "apk_bad_zip")
+        raise GameDataError("APK 打不开（zip 结构损坏）：%s" % apk, "apk_bad_zip") from None
     except OSError as exc:
-        raise GameDataError("读 APK 失败：%s" % exc, "apk_read_error")
-
+        raise GameDataError("读 APK 失败：%s" % exc, "apk_read_error") from exc
     if progress:
-        progress.emit("校验整包 sha256（大文件要几十秒）…", done=1)
+        progress.emit("记录整包 sha256（不作渠道身份限制）…", done=1)
     whole_sha = sha256_file(apk)
-
-    problems = []
-    matched = None
-    for build, profile in VERSION_PROFILES.items():
-        if native_sha == profile["native_sha256"] and directory_sha == profile["apk_directory_sha256"]:
-            matched = (build, profile)
-            break
-    if matched is None:
-        if native_sha not in {p["native_sha256"] for p in VERSION_PROFILES.values()}:
-            problems.append("libBootloader.so 的 SHA-256 不对（不是国服 0.16.8 / 421629）")
-        if directory_sha not in {p["apk_directory_sha256"] for p in VERSION_PROFILES.values()}:
-            problems.append("APK 目录身份（文件名/大小/CRC）不对（不是这份国服 0.16.8 / 421629）")
-        if not problems:
-            problems.append("libBootloader.so 与 APK 目录身份不是同一个版本档位")
-    if problems:
-        raise GameDataError("；".join(problems) + "。只接受国服 0.16.8 / 421629 的安装包。",
-                            "apk_identity_mismatch")
-    build, profile = matched
     return {
-        "ok": True,
-        "path": str(apk),
-        "package": APK_PACKAGE,
-        "version": profile["version"],
-        "version_code": build,
-        "build": build,
-        "sha256": whole_sha,
-        "bytes": apk.stat().st_size,
-        "bytes_human": human_size(apk.stat().st_size),
-        "apk_archive_directory_sha256": directory_sha,
-        "native_sha256": native_sha,
-        "identity_source": "native ELF sha256 + APK archive directory sha256（同 W2/W3 profile）",
+        "ok": True, "path": str(apk), "package": APK_PACKAGE,
+        "version": identity["version"], "version_code": identity["build"],
+        "build": identity["build"], "sha256": whole_sha,
+        "bytes": apk.stat().st_size, "bytes_human": human_size(apk.stat().st_size),
+        **identity,
+        "identity_source": ("native ELF sha256 + legacy exact APK directory"
+                            if identity["legacy"] else "native ELF sha256 + used resource member subsets"),
     }
 
 
@@ -197,6 +168,17 @@ def _merge_apk_view(base: Path, splits: list[Path], out: Path,
     return out
 
 
+def _pulled_validation_error(error):
+    """拉取阶段已完成：保留原机器码，避免 UI 把资源校验失败显示成拉取失败。"""
+    result = GameDataError("拉取成功，但安装包校验未通过：" + error.message, error.code)
+    result.stage = "validate_pulled_apk"
+    result.child_code = error.code
+    for key in ("members", "difference_count"):
+        if hasattr(error, key):
+            setattr(result, key, getattr(error, key))
+    return result
+
+
 def pull_apk(adb: str, serial: str | None, data_dir: Path) -> dict:
     adb_path = Path(adb)
     if not adb_path.is_file():
@@ -262,11 +244,14 @@ def pull_apk(adb: str, serial: str | None, data_dir: Path) -> dict:
         return result
     except GameDataError as exc:
         if not splits:
-            raise
+            raise _pulled_validation_error(exc) from exc
         progress.emit("base 不完整（%s），合并 split 视图…" % exc.code, done=5)
         merged = dest / "merged.apk"
         _merge_apk_view(base, splits, merged, progress)
-        info = inspect_apk(merged, progress=None)
+        try:
+            info = inspect_apk(merged, progress=None)
+        except GameDataError as merged_error:
+            raise _pulled_validation_error(merged_error) from merged_error
         result.update({"apk": str(merged), "check": info, "merged": True,
                        "base_check_error": exc.message})
         progress.finish("split 合并后校验通过")
@@ -282,7 +267,8 @@ def cmd_check(args) -> int:
         final(True, **info)
         return 0
     except GameDataError as exc:
-        final(False, error=exc.message, code=exc.code)
+        extra = {key: getattr(exc, key) for key in ("members", "difference_count") if hasattr(exc, key)}
+        final(False, error=exc.message, code=exc.code, **extra)
         return 1
 
 
@@ -295,5 +281,6 @@ def cmd_pull(args) -> int:
         final(True, **result)
         return 0
     except GameDataError as exc:
-        final(False, error=exc.message, code=exc.code)
+        extra = {key: getattr(exc, key) for key in ("stage", "child_code", "members", "difference_count") if hasattr(exc, key)}
+        final(False, error=exc.message, code=exc.code, **extra)
         return 1

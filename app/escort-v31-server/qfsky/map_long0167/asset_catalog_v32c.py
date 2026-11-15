@@ -261,7 +261,7 @@ def _placement(placement,entry):
 def _placement_level_link(feet,xyz,prov,entry):
     support=prov.get('support',{});portal=prov.get('portal_clearance',{});marker=prov.get('placementBoundary',{})
     normal=_finite_vec(support.get('signed_normal'),3,'placement_normal')
-    if (prov.get('native_sha256')!=NATIVE_SHA256 or prov.get('apk_archive_directory_sha256')!=_B.APK_DIRECTORY_SHA or
+    if (prov.get('native_sha256')!=NATIVE_SHA256 or not _B._resource_provenance_matches(prov,native_sha256=NATIVE_SHA256) or
         prov.get('source_member')!='assets/Data/Levels/'+entry['scene']+'/Objects.level.bin' or
         prov.get('entry_type')!='LevelLink'or type(prov.get('entry_object_index'))is not int or
         type(prov.get('transform_object_index'))is not int or prov['transform_object_index']!=marker.get('object_index')or
@@ -347,7 +347,7 @@ def _placement_level_start(feet,prov,entry,runtime=False):
         type(spawn)is not dict or type(bound)is not dict or type(selected)is not dict):_fail('placement_level_start_shape')
     if runtime:_runtime_level_start_evidence(feet,prov,entry,support)
     # 1. 场景/源资产 pin：Objects.level.bin 必须是本场景成员，几何 manifest 与分量都要 pin。
-    if (prov.get('native_sha256')!=NATIVE_SHA256 or prov.get('apk_archive_directory_sha256')!=_B.APK_DIRECTORY_SHA or
+    if (prov.get('native_sha256')!=NATIVE_SHA256 or not _B._resource_provenance_matches(prov,native_sha256=NATIVE_SHA256) or
         prov.get('source_member')!='assets/Data/Levels/'+entry['scene']+'/Objects.level.bin'):_fail('placement_level_start_source')
     for key in('source_member_sha256','apk_member_sha256','geometry_manifest_sha256'):_B._pin(prov.get(key))
     # source_member_sha256 必须与 scene-provenance 的成员 pin 相等（_scene_proof 会交叉核对）；
@@ -470,7 +470,7 @@ def _placement_user_annotation(feet,prov,entry):
     if type(ann)is not dict or type(eng)is not dict or type(portal)is not dict or type(bound)is not dict:_fail('placement_user_shape')
     # 1. 标注记录原样嵌入并 pin；场景/地图号必须与目录项一致，来源必须是工作台。
     if prov.get('annotation_sha256')!=_sha(canonical_json(ann)):_fail('placement_user_annotation_pin')
-    if (prov.get('native_sha256')!=NATIVE_SHA256 or prov.get('apk_archive_directory_sha256')!=_B.APK_DIRECTORY_SHA or
+    if (prov.get('native_sha256')!=NATIVE_SHA256 or not _B._resource_provenance_matches(prov,native_sha256=NATIVE_SHA256) or
         prov.get('source_member')!='assets/Data/Levels/'+entry['scene']+'/Objects.level.bin'):_fail('placement_user_source')
     _B._pin(prov.get('source_member_sha256'))
     if (ann.get('scene')!=entry['scene']or str(ann.get('map_id'))!=str(entry['level_id'])or
@@ -538,7 +538,7 @@ def _scene_proof(proof,entry,observed,cache,wire,placement):
         if a.get('sha256')!=_sha(data)or type(a.get('bytes'))is not int or a['bytes']!=len(data):_fail('scene_artifact_pin')
     prov=proof.get('provenance',{})
     if (prov.get('native_sha256')!=NATIVE_SHA256 or prov.get('apk_build')!=421629 or
-        prov.get('apk_archive_directory_sha256')!=_B.APK_DIRECTORY_SHA or
+        not _B._resource_provenance_matches(prov,native_sha256=NATIVE_SHA256) or
         prov.get('scene_member_sha256')!=placement['provenance']['source_member_sha256']or
         prov.get('scene_member')!=placement['provenance']['source_member']or prov.get('runtime_capture')is not False or
         prov.get('native_record_comparison')not in(False,True)):_fail('scene_resource_provenance')  # 2026-11-06：True=APK 推导版本号已与真实录制核对一致

@@ -7,9 +7,11 @@ sys.path.insert(0,str(ROOT/'src'))
 for _p in Path(__file__).resolve().parents:
     if (_p/'xg_exec.py').is_file(): sys.path.insert(0,str(_p)); break
 import xg_exec
+import xg_paths
 from skyterrain.cli import atomic,save_json
 from skyterrain.catalog import Catalog,scene_hash
 from skyterrain.baked_terrain import PROFILE
+from xg_gamedata.apk_identity import validate_apk_members
 
 EMPTY_HASH='fed40a4aa38016626f1a288eb95948e401805973c6fd2e98b08fb80ebe9955f9'
 
@@ -27,10 +29,11 @@ def run(cmd,log,timeout,env):
     atomic(log,data)
     return {'exit_code':code,'seconds':time.monotonic()-start,'log':str(log.relative_to(log.parent.parent))}
 
-def inventory(apk):
+def inventory(apk, *, with_identity=False):
     with zipfile.ZipFile(apk) as z:
+        identity=validate_apk_members(z,consumers=('terrain',),expected_build=421629)
         names=z.namelist()
-        if len(names)!=len(set(names)):raise ValueError('duplicate_archive_members')
+        # Central validation already rejects duplicates in consumed resources/inventories.
         members=[];rows=[]
         for n in names:
             m=re.fullmatch(r'assets/Data/Levels/([A-Za-z0-9_-]{1,80})/BstBaked\.meshes',n)
@@ -50,7 +53,19 @@ def inventory(apk):
                         reason='hash_bound_LOD_only_empty_scene_no_initial_geometry',source_sha256=digest)
             rows.append(row)
         for info in z.infolist():members.append((info.filename,info.file_size,info.CRC))
-    return sorted(rows,key=lambda r:r['scene_name']),hashlib.sha256(json.dumps(sorted(members),separators=(',',':')).encode()).hexdigest()
+    actual_directory=hashlib.sha256(json.dumps(sorted(members),separators=(',',':')).encode()).hexdigest()
+    # Preserve the legacy public return by default. New callers explicitly request
+    # canonical resource identity separately from actual whole-directory provenance.
+    identity=dict(identity,terrain_archive_directory_sha256=actual_directory)
+    return sorted(rows,key=lambda r:r['scene_name']),identity if with_identity else actual_directory
+
+def _resume_identity_matches(previous, identity):
+    canonical=previous.get('resource_identity_sha256')
+    if canonical is not None:
+        return canonical==identity['resource_identity_sha256']
+    # A pre-migration cache has no member proof. Keep its old exact-input contract.
+    return previous.get('archive_directory_sha256')==identity['terrain_archive_directory_sha256']
+
 
 def valid_ready_files(out,row):
     try:
@@ -90,12 +105,14 @@ def _pid_alive(pid):
 def main(argv=None):
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--apk',required=True,type=Path);ap.add_argument('--out',required=True,type=Path)
-    ap.add_argument('--node',required=True);ap.add_argument('--maps',nargs='+')
+    ap.add_argument('--node',default=None);ap.add_argument('--maps',nargs='+')
     ap.add_argument('--timeout',type=int,default=90);ap.add_argument('--resume',action='store_true')
     ap.add_argument('--retry-failed',action='store_true')
     ap.add_argument('--refresh-navigation',action='store_true',help='Rebuild navigation; retain hash-checked existing geometry and its old builder identity')
     ap.add_argument('--navigation-dir',default='navigation')
     a=ap.parse_args(argv)
+    try:a.node=xg_paths.require_node_exe(a.node)
+    except xg_paths.NodeResolutionError as exc:ap.error(f"{exc.code}: {exc.message}")
     if not 10<=a.timeout<=600:raise ValueError('timeout_budget')
     if not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}',a.navigation_dir):raise ValueError('navigation_dir')
     # W5：不要 resolve（会把 8.3 短路径展开成 MAX_PATH 以外的长路径）。
@@ -117,14 +134,18 @@ def main(argv=None):
         lock.close()
         if lockpath.exists() and lockpath.read_text(encoding='ascii')==str(os.getpid()):lockpath.unlink()
     atexit.register(unlock)
-    rows,apk_id=inventory(a.apk);sig=fingerprint();catalog_file=out/'catalog.json'
-    data={'format':'skyterrain-catalog-v1','profile':PROFILE,'archive_directory_sha256':apk_id,
+    rows,identity=inventory(a.apk,with_identity=True);sig=fingerprint();catalog_file=out/'catalog.json'
+    data={'format':'skyterrain-catalog-v1','profile':PROFILE,
+        'archive_directory_sha256':identity['terrain_archive_directory_sha256'],
+        'resource_identity_sha256':identity['resource_identity_sha256'],'identity_mode':identity['identity_mode'],
+        'apk_archive_directory_sha256':identity['apk_archive_directory_sha256'],
+        'reference_apk_archive_directory_sha256':identity['reference_apk_archive_directory_sha256'],
         'implementation_sha256':sig,'asset_root':str(out),'scene_count':len(rows),'entries':rows,
         'coverage_meaning':'Ready means offline construction only. Dynamic state and client calibration remain unverified.'}
     if catalog_file.exists():
         if not a.resume:raise ValueError('existing_catalog_requires_resume')
         old=json.loads(catalog_file.read_text(encoding='utf-8'))
-        if old.get('archive_directory_sha256')!=apk_id or (old.get('implementation_sha256')!=sig and not a.refresh_navigation):
+        if not _resume_identity_matches(old,identity) or (old.get('implementation_sha256')!=sig and not a.refresh_navigation):
             raise ValueError('resume_source_changed_use_new_output')
         previous=Catalog.from_file(catalog_file)
         for i,row in enumerate(rows):
@@ -141,7 +162,7 @@ def main(argv=None):
     audit_path=ROOT/'research/formats/terrain-full-audit-v2.json'
     audit=json.loads(audit_path.read_text(encoding='utf-8')) if audit_path.is_file() else {'rows':[]}
     audited={r['member']:r for r in audit['rows']}
-    env=dict(os.environ,PYTHONPATH=str(ROOT/'src'),PYTHONDONTWRITEBYTECODE='1')
+    env=dict(os.environ,XG_NODE=a.node,PYTHONPATH=str(ROOT/'src'),PYTHONDONTWRITEBYTECODE='1')
     def checkpoint():
         Catalog(rows)
         data['summary']={axis:dict(collections.Counter(r[axis] for r in rows)) for axis in ('read_status','collision_status','nav_status')}

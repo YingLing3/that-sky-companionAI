@@ -81,6 +81,9 @@ def extract(apk: Path, dest: Path, *, expected_sha: str = SHA256,
         raise GameDataError("APK 不存在：%s" % apk, "dictionary_apk_missing")
     if progress:
         progress.emit("从 APK 提取压缩字典…", done=0)
+    from .apk_identity import validate_apk_members
+    from .common import APK_BUILD
+    validate_apk_members(apk, consumers=("names",), expected_build=APK_BUILD)
     member, raw = _read_member(apk)
     info = validate(raw, expected_sha=expected_sha, expected_size=expected_size,
                     expected_id=expected_id)

@@ -32,10 +32,13 @@ def _optional_props_tail(plan, kind, index, completed):
             and plan[2][0] == "props" and "--optional" in plan[2])
 
 
-def _optional_props_warning(code):
+def _optional_props_warning(code, child=None):
+    child = child if isinstance(child, dict) else {}
+    code = str(child.get("code") or code)
     print(json.dumps({"ok": True, "kind": "data",
           "props": {"ready": False, "state": "missing", "code": code},
           "warning_code": code,
+          "child_failure": {k: child[k] for k in ("error", "message", "code", "stage") if k in child},
           "warning": "名称表与地形已成功，道具形状未生成。可单独补生成；当前暂停道具地形与坐座位，行走可用。"},
           ensure_ascii=False), flush=True)
     return 0
@@ -55,11 +58,14 @@ def run_plan(plan, kind):
         except OSError as exc:
             if _optional_props_tail(plan, kind, i, completed):
                 return _optional_props_warning("props_process_start_failed")
-            print(json.dumps({"ok": False, "stage": "chain",
+            print(json.dumps({"ok": False, "stage": "chain", "code": "core_process_start_failed",
                               "error": f"起不了 xg_gamedata：{type(exc).__name__}"},
                              ensure_ascii=False), flush=True)
             return 1
+        # Per-child state: a recovered/previous command failure must never
+        # supply the reason for a later command with no explicit failure.
         final = None
+        failure = None
         try:
             assert proc.stdout is not None
             for line in proc.stdout:
@@ -72,19 +78,30 @@ def run_plan(plan, kind):
                         continue
                     if isinstance(doc, dict) and "ok" in doc:
                         final = doc
+                        if doc.get("ok") is False:
+                            failure = doc
             code = proc.wait()
         except KeyboardInterrupt:
             proc.terminate()
             return 130
         if _optional_props_tail(plan, kind, i, completed) and (
                 code != 0 or final is None or final.get("ok") is not True):
-            return _optional_props_warning("props_process_incomplete")
+            return _optional_props_warning("props_process_incomplete", failure)
         if code != 0:
-            print(json.dumps({"ok": False, "stage": "chain", "code": "core_process_failed",
-                              "error": "资源子命令未正常退出，未确认成功"}, ensure_ascii=False), flush=True)
+            # Preserve the actual child rejection instead of appending a generic
+            # failure that would overwrite it in tasks.current(). A final true
+            # line with nonzero exit is not success; prefer a real false event.
+            failed = dict(failure) if failure is not None else {"ok": False}
+            failed["ok"] = False
+            failed["code"] = failed.get("code") or "core_process_failed"
+            failed["error"] = failed.get("error") or failed.get("message") or "资源子命令未正常退出，未确认成功"
+            failed.setdefault("stage", "chain")
+            failed["chain_command"] = str(args[0]) if args else ""
+            failed["child_exit_code"] = code
+            print(json.dumps(failed, ensure_ascii=False), flush=True)
             return 1
         if final is None:
-            print(json.dumps({"ok": False, "stage": "chain",
+            print(json.dumps({"ok": False, "stage": "chain", "code": "core_result_missing",
                               "error": "xg_gamedata 没有输出结果行"}, ensure_ascii=False), flush=True)
             return 1
         if final.get("ok") is not True:

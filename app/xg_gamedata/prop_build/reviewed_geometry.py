@@ -5,12 +5,16 @@ import numpy as np
 from .coverage_cleanup import remove_covered_degenerates
 from .simplify_collision import simplify,verify_certificate,remove_covered_slivers,verify_sliver_cleanup
 
-APK_SHA256='c8017dc7faac95d3f4f706e8dd44dc4bd0319429d5213e255c98afb03fb6fc4e'
 BASE=Path(__file__).resolve().parent
 
 def load_policy(apk_identity):
     from .rules import POLICY
-    if apk_identity.get('sha256') != APK_SHA256:
+    resource = apk_identity.get('resource_identity_sha256')
+    if (apk_identity.get('native_sha256') != POLICY['native_sha256']
+            or apk_identity.get('build') != 421629
+            or apk_identity.get('identity_mode') != 'native-and-resource-members'
+            or not isinstance(resource,str) or re.fullmatch(r'[0-9a-f]{64}',resource) is None
+            or (apk_identity.get('consumer_sha256') or {}).get('props') != resource):
         raise ValueError('unsupported_apk_geometry_policy')
     policy = json.loads(json.dumps(POLICY))
     policy['sha256'] = hashlib.sha256(json.dumps(POLICY, sort_keys=True).encode()).hexdigest()

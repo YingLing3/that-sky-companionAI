@@ -765,11 +765,10 @@ def _plan_scene(zf, scene: str, evidence: dict, finite: FiniteGroups, emulator: 
     map_id = fnv32(scene)
     if map_id != row["map_id"]:
         raise GameDataError("场景 %s 的 map_id 不对" % scene, "map_id_mismatch")
+    from .apk_identity import resource_provenance
     provenance = {
         "kind": "apk_static_derived_v32",
-        "apk_archive_directory_sha256": evidence["apk_archive_directory_sha256"],
-        "native_sha256": evidence["native_sha256"],
-        "apk_build": APK_BUILD,
+        **resource_provenance(evidence["actual_apk_identity"], "catalog"),
         "scene_member": member,
         "scene_member_sha256": row["member_sha256"],
         "resource_revision": evidence["provenance_resource_revision_note"],
@@ -837,6 +836,11 @@ def _reuse(paths: dict, scene: str, evidence: dict, pins: dict) -> bool:
             or report.get("source_pins") != pins
             or (report.get("provenance") or {}).get("scene_member_sha256") != row["member_sha256"]
             or report.get("netversion_u16") != row["netversion_u16"]):
+        return False
+    from qfsky.apk_resource_identity import resource_provenance_matches
+    if not resource_provenance_matches(
+            report.get("provenance"), native_sha256=evidence["native_sha256"],
+            reference_directory_sha256=evidence["apk_archive_directory_sha256"], scope="catalog"):
         return False
     for kind, key in (("native", "native"), ("cache", "cache"), ("wire", "wire")):
         try:
@@ -920,12 +924,14 @@ def ensure_scene_inputs(apk: Path, cache_dir: Path, progress: Progress | None = 
     except (OSError, zipfile.BadZipFile):
         raise GameDataError("APK 打不开：%s" % apk, "apk_bad_zip") from None
     try:
-        directory = hashlib.sha256(json.dumps(
-            sorted((i.filename, i.file_size, i.CRC) for i in zf.infolist()),
-            separators=(",", ":")).encode()).hexdigest()
-        if directory != evidence["apk_archive_directory_sha256"]:
-            raise GameDataError("APK 目录身份与版本证据不一致（不是 0.16.8/421629）",
-                                "apk_identity_mismatch")
+        from .apk_identity import validate_apk_members
+        identity = validate_apk_members(zf, consumers=("catalog",), expected_build=APK_BUILD)
+        # The reference evidence remains immutable in meaning; actual channel directory is separate.
+        evidence = dict(evidence)
+        evidence["actual_apk_identity"] = identity
+        evidence["actual_apk_archive_directory_sha256"] = identity["apk_archive_directory_sha256"]
+        evidence["resource_identity_sha256"] = identity["consumer_sha256"]["catalog"]
+        evidence["resource_identity_schema"] = identity["resource_identity_schema"]
         own.emit("校验 APK 与 native…")
         native_raw = zf.read(NATIVE_MEMBER)
         native = NativeImage(native_raw, evidence["native_sha256"])
@@ -993,6 +999,11 @@ def ensure_scene_inputs(apk: Path, cache_dir: Path, progress: Progress | None = 
             "apk": str(apk),
             "apk_build": APK_BUILD,
             "native_sha256": evidence["native_sha256"],
+            "apk_archive_directory_sha256": identity["apk_archive_directory_sha256"],
+            "reference_apk_archive_directory_sha256": evidence["apk_archive_directory_sha256"],
+            "resource_identity_schema": identity["resource_identity_schema"],
+            "resource_identity_scope": "catalog",
+            "resource_identity_sha256": identity["consumer_sha256"]["catalog"],
             "resource_revision": evidence["resource_revision"],
             "source_pins": pins,
             "static_whitelist": {

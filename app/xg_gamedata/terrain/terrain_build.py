@@ -52,6 +52,7 @@ for _p in Path(__file__).resolve().parents:
         sys.path.insert(0, str(_p))
         break
 import xg_exec  # noqa: E402
+import xg_paths  # noqa: E402
 
 from skyterrain.baked_terrain import PROFILE, ELF_SHA256  # noqa: E402
 from skyterrain.catalog import Catalog, scene_hash  # noqa: E402
@@ -423,8 +424,7 @@ def apk_inventory(apk: Path):
         raise ValueError(f"APK 不存在: {apk}")
     with zipfile.ZipFile(apk) as z:
         names = z.namelist()
-        if len(names) != len(set(names)):
-            raise ValueError("APK 内存在重复成员，拒绝继续")
+        # Duplicates relevant to terrain are rejected by BW.verify_profile below.
         scenes = sorted(m.group(1) for n in names if (m := SCENE_MESH.fullmatch(n)))
         if not scenes:
             raise ValueError("APK 内没有 assets/Data/Levels/*/BstBaked.meshes")
@@ -443,7 +443,11 @@ def apk_inventory(apk: Path):
         with apk.open("rb") as stream:
             while block := stream.read(8 * 1024 * 1024):
                 digest.update(block)
-        return scenes, profile, {"sha256": digest.hexdigest(), "bytes": apk.stat().st_size}
+        return scenes, profile, {"sha256": digest.hexdigest(), "bytes": apk.stat().st_size,
+            "resource_identity_sha256": profile["resource_identity_sha256"],
+            "apk_archive_directory_sha256": profile["apk_archive_directory_sha256"],
+            "reference_apk_archive_directory_sha256": profile["reference_apk_archive_directory_sha256"],
+            "identity_mode": profile["identity_mode"]}
     raise AssertionError("unreachable")
 
 
@@ -452,6 +456,7 @@ def apk_inventory(apk: Path):
 # --------------------------------------------------------------------------- #
 def base_stage(apk: Path, work: Path, maps: list[str], all_scenes: list[str],
                node: str, resume: bool, timeout: int, summary: dict, progress: StageProgress):
+    node=xg_paths.require_node_exe(node)
     out = work / "all-scenes-v1"
     out.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, "-X", "utf8", "-B", TOOLS / "build_all_maps.py",
@@ -460,7 +465,7 @@ def base_stage(apk: Path, work: Path, maps: list[str], all_scenes: list[str],
         cmd += ["--maps", *maps]
     if (out / "catalog.json").exists():
         cmd += ["--resume"]
-    env = dict(os.environ, PYTHONPATH=str(SRC), PYTHONDONTWRITEBYTECODE="1",
+    env = dict(os.environ, XG_NODE=node, PYTHONPATH=str(SRC), PYTHONDONTWRITEBYTECODE="1",
                PYTHONIOENCODING="utf-8", SKYTERRAIN_REQUIRED_ONLY="1")
 
     def line(text):
@@ -725,6 +730,7 @@ def nav_resume_compatible(old: dict, world_summary: Path, base_catalog: Path) ->
 def nav_stage(work: Path, world_summary: Path, base_catalog: Path, maps: list[str],
               all_scenes: list[str], node: str, workers: int, summary: dict,
               progress: StageProgress):
+    node=xg_paths.require_node_exe(node)
     root = work / "beamo-navigation-all-v1"
     resume = (root / "summary.json").exists()
     if resume:
@@ -753,7 +759,7 @@ def nav_stage(work: Path, world_summary: Path, base_catalog: Path, maps: list[st
         cmd += ["--maps", *maps]
     if resume:
         cmd += ["--resume"]
-    env = dict(os.environ, PYTHONPATH=str(SRC), PYTHONDONTWRITEBYTECODE="1",
+    env = dict(os.environ, XG_NODE=node, PYTHONPATH=str(SRC), PYTHONDONTWRITEBYTECODE="1",
                PYTHONIOENCODING="utf-8", SKYTERRAIN_REQUIRED_ONLY="1")
     counter = {"done": 0}
 
@@ -1188,7 +1194,7 @@ def main(argv=None):
     parser.add_argument("--progress-maps", help="进度统计的启用地图，逗号分隔；不改变资源生成范围")
     parser.add_argument("--resume", action="store_true", help="续跑已有输出")
     parser.add_argument("--work", type=Path, help="中间目录（默认 <out>.work）")
-    parser.add_argument("--node", default=shutil.which("node") or "node")
+    parser.add_argument("--node", default=None)
     parser.add_argument("--workers", type=int, default=1, choices=(1, 2),
                         help="导航并发；8GB 机器建议 1（默认）")
     parser.add_argument("--timeout", type=int, default=300,
@@ -1200,6 +1206,8 @@ def main(argv=None):
     parser.add_argument("--fresh-nav-reports", action="store_true",
                         help="用本机新生成的 nav-build 报告（catalog 不再是 v13 钉值 sha）")
     args = parser.parse_args(argv)
+    try:args.node=xg_paths.require_node_exe(args.node)
+    except xg_paths.NodeResolutionError as exc:parser.error(f"{exc.code}: {exc.message}")
     if not 30 <= args.timeout <= 900:
         parser.error("--timeout 必须在 30..900 之间")
     apk = _abs(args.apk)
@@ -1328,7 +1336,7 @@ def main(argv=None):
         log(f"      输出 {summary['totals']['output']['MiB']} MiB，"
             f"耗时 {fmt_seconds(total)}，峰值内存 "
             f"{summary['memory']['peak_tree_rss_mb']} MiB")
-        log(f"      引擎: node engine/staged_worker.mjs --assets \"{out}\" --offline")
+        log(f"      引擎: \"{args.node}\" engine/staged_worker.mjs --assets \"{out}\" --offline")
         log(f"      清单: {catalog_path}  sha256 {summary['catalog']['sha256']}")
         if summary["catalog"]["matches_v13"]:
             log("      catalog 与 release-v20 钉值逐字节一致（d6129a6a…）")

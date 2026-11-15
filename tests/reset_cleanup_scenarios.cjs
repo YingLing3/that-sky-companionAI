@@ -32,7 +32,19 @@ function environment(extra={}){
   let response={ok:true,plan_id:'fixture-plan',expires_at:Date.now()/1000+300,total_bytes:4096,
     items:[{category:'terrain',path:'game/fixture/terrain',bytes:4096,files:2,action:'quarantine'}]};
   const options={request:async (url,body)=>{calls.push({url,body});return url.endsWith('preview')?response:{ok:true,message:'fixture complete'};},
-    getStatus:async()=>status,isBusy:()=>false,onSuccess:async mode=>success.push(mode),onBusy:b=>busy.push(b),navigate:s=>navigation.push(s),...extra};
+    getStatus:async()=>status,isBusy:()=>false,onSuccess:async mode=>success.push(mode),onBusy:b=>busy.push(b),navigate:s=>navigation.push(s),reconnect:false,delay:async()=>{},...extra};
+  // Legacy cases assert unchanged business payload/confirmation semantics.
+  // Adapt their old synchronous fixture handlers to immediate completed async jobs;
+  // the new async suite exercises raw HTTP envelopes, polling and request IDs.
+  let legacyRequest=options.request;
+  if(!extra.rawProtocol)Object.defineProperty(options,'request',{get:()=>async(url,body)=>{
+    assert.equal(typeof body.request_id,'string');assert(body.request_id.length>0);
+    const payload={...body};delete payload.request_id;
+    const result=await legacyRequest(url,payload);
+    const action=url.split('/').at(-1);
+    return {ok:true,task_id:'legacy-'+body.request_id,task:{id:'legacy-'+body.request_id,request_id:body.request_id,
+      action,selection:payload.selection||null,running:false,status:result.ok===false?'failed':'succeeded',result}};
+  },set:value=>{legacyRequest=value;}});
   const ui=ctx.XGDataCleanup.mount(host,options);
   return {ui,host,doc,ctx,calls,success,busy,navigation,options,setStatus:v=>{status=v;},setResponse:v=>{response=v;},getResponse:()=>response};
 }

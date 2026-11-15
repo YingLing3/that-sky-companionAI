@@ -217,7 +217,7 @@ def run(once=False):
                               last_error_detail=error_detail.describe(
                                   None, code="adb_missing",
                                   text="device.find_adb() returned none"),
-                              message="没找到 MuMu：确认装了 MuMu 12，或在上面的输入框手填 adb.exe 路径。")
+                              message="没找到 MuMu：确认已安装 MuMu（支持 Android 15，兼容旧版），或在上面的输入框手填本机实际 adb.exe 路径。")
                 write_status(status)
                 if once:
                     return 1

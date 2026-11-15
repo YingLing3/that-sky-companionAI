@@ -151,10 +151,8 @@ def _expand_runtime_paths(doc):
             out[key] = str(p)
         elif isinstance(value, str) and value.startswith('app:'):
             out[key] = str(xg_paths.APP / value[4:])
-    if out.get('nodeExecutable') == 'node':
-        found = xg_paths.node_exe()
-        if found:
-            out['nodeExecutable'] = found
+    if isinstance(out.get('nodeExecutable'), str) and out['nodeExecutable'].strip().lower() in ('', 'node', 'node.exe'):
+        out['nodeExecutable'] = xg_paths.require_node_exe(out['nodeExecutable'])
     hop = out.get('hopV20')
     if isinstance(hop, dict):
         hop = dict(hop)

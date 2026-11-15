@@ -224,7 +224,7 @@ def build_destinations(scenes: list[str], apk: Path, out_dir: Path) -> dict:
 
 
 def generate(apk: Path, data: Path, progress: Progress) -> dict:
-    info = inspect_apk(apk, progress)
+    info = inspect_apk(apk, progress, consumers=("names",), expected_build=APK_BUILD)
     out_dir = game_dir(data) / "names"
     out_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(apk) as zf:
@@ -256,7 +256,8 @@ def generate(apk: Path, data: Path, progress: Progress) -> dict:
         if code not in ("apk_missing", "dictionary_size", "dictionary_magic",
                         "dictionary_id", "dictionary_sha256", "dictionary_missing",
                         "dictionary_bad_zip", "dictionary_apk_read", "dictionary_apk_missing",
-                        "dictionary_write_verify", "dictionary_io"):
+                        "dictionary_write_verify", "dictionary_io", "apk_resource_mismatch",
+                        "apk_resource_manifest", "apk_identity_mismatch", "apk_build_mismatch"):
             code = "dictionary_unavailable"
         raise GameDataError("压缩字典生成或校验失败（%s）。名称表已保留，请检查安装包后重试或续跑。" % code,
                             code)

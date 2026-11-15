@@ -7,7 +7,7 @@ from . import read_mesh,read_meshes,NodeMeshoptDecoder,extract_members
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Inspect Sky native geometry (render-only semantics).')
     commands=parser.add_subparsers(dest='command',required=True)
-    inspect=commands.add_parser('inspect');inspect.add_argument('file');inspect.add_argument('--node',default='node');inspect.add_argument('--decoder-module')
+    inspect=commands.add_parser('inspect');inspect.add_argument('file');inspect.add_argument('--node',default=None);inspect.add_argument('--decoder-module')
     extract=commands.add_parser('extract');extract.add_argument('apk');extract.add_argument('output');extract.add_argument('members',nargs='+')
     args=parser.parse_args(argv)
     if args.command=='extract':

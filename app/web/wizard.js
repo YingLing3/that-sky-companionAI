@@ -50,11 +50,17 @@
       init.headers = Object.assign({ "Content-Type": "application/json" }, init.headers || {});
       init.body = JSON.stringify(init.body);
     }
-    const r = await fetch(path, init);
-    let body = {};
-    try { body = await r.json(); } catch (e) { body = { ok: false, message: "接口返回的不是 JSON" }; }
-    body.__http = r.status;
-    return body;
+    const timeoutMs = init.timeoutMs; delete init.timeoutMs;
+    const controller = Number.isFinite(timeoutMs) ? new AbortController() : null;
+    if (controller) init.signal = controller.signal;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+      const r = await fetch(path, init);
+      let body = {};
+      try { body = await r.json(); } catch (e) { body = { ok:false,message:"接口返回的不是 JSON" }; }
+      body.__http = r.status;
+      return body;
+    } finally { if (timer !== null) clearTimeout(timer); }
   }
 
   function showResult(el, text, ok) {
@@ -157,7 +163,7 @@
   function mountCleanup() {
     if (!window.XGDataCleanup) return;
     state.cleanup = window.XGDataCleanup.mount($("wz-cleanup"), {
-      request: (path, body) => api(path, {method: "POST", body}),
+      request: (path, body) => api(path, body === undefined ? {timeoutMs:15000} : {method:"POST",body,timeoutMs:15000}),
       getStatus: () => api("/xiaoguang/status"),
       isBusy: () => !!state.resourceStartBusy||!!state.resourceTaskRunning||!!(state.summary && state.summary.task && state.summary.task.running),
       onBusy: busy => {
@@ -167,6 +173,7 @@
         });
       },
       navigate: step => { go(step === "data" || step === "props" ? "data" : "capture"); const button=$(step === "props" ? "wz-props-start" : step === "catalog" ? "wz-catalog-start" : step === "capture" ? "wz-cap-start" : "wz-data-start"); if(button)button.focus(); },
+      onUnknown: () => refresh(),
       onSuccess: async (mode, result) => {
         const onlyProps=result && result.selection && result.selection.props===true && !['terrain','catalog','names','captures'].some(k=>result.selection[k]);
         if (mode !== "purge" && !onlyProps) {
@@ -293,7 +300,9 @@
           await checkApk(true);
         }
       } else if (task && !task.ok) {
-        showResult($("wz-apk-result"), "拉取失败：" + (task.error || "未知错误"), false);
+        const message = task.error || task.result?.error || "拉取失败：未知错误";
+        const code = task.error_code || task.result?.code || "";
+        showResult($("wz-apk-result"), message + (code ? "（错误码：" + code + "）" : ""), false);
       }
     });
   }
@@ -306,7 +315,8 @@
     showResult($("wz-apk-result"), auto ? "拉取完成，正在校验安装包…" : "正在校验安装包…", true);
     const r = await api("/api/wizard/apk/check", { method: "POST", body: { path: path } });
     b.disabled = false;
-    showResult($("wz-apk-result"), (r.ok ? "✓ " : "✗ ") + (r.message || ""), !!r.ok);
+    const code = !r.ok && r.code ? "（错误码：" + r.code + "）" : "";
+    showResult($("wz-apk-result"), (r.ok ? "✓ " : "✗ ") + (r.message || "") + code, !!r.ok);
     if (r.ok) await refresh();
   }
 

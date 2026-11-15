@@ -74,6 +74,8 @@ _SHUTDOWN_STARTED = False
 _SERVER = None
 _CLEANUP_SERVICE = None
 _CLEANUP_ROOT = None
+_CLEANUP_TASKS = None
+_CLEANUP_TASKS_INIT_LOCK = threading.Lock()
 
 BOT = xg_paths.BOT_CODE
 WEB = xg_paths.WEB
@@ -127,10 +129,10 @@ def _cleanup_busy() -> bool:
         return True
 
 
-def _cleanup_service():
+def _cleanup_service(data_root=None):
     global _CLEANUP_SERVICE, _CLEANUP_ROOT
     import data_cleanup
-    root = Path(xg_paths.DATA).resolve()
+    root = Path(data_root if data_root is not None else xg_paths.DATA).resolve()
     if _CLEANUP_SERVICE is None or _CLEANUP_ROOT != root:
         _CLEANUP_SERVICE = data_cleanup.CleanupService(
             root, is_online=_cleanup_online, is_busy=_cleanup_busy)
@@ -138,13 +140,52 @@ def _cleanup_service():
     return _CLEANUP_SERVICE
 
 
-def cleanup_action(action, payload):
-    """Called only after local authentication, origin validation and API LOCK."""
+def _cleanup_preflight():
+    if _cleanup_online():
+        return {"ok": False, "error_code": "client_online", "message": "请先让小光下线并停止聊天/换图，再维护数据"}
+    if _cleanup_busy():
+        return {"ok": False, "error_code": "task_busy", "message": "请先停止采集或等待当前构建完成"}
+    return None
+
+
+def _cleanup_tasks():
+    global _CLEANUP_TASKS
+    if _CLEANUP_TASKS is None:
+        with _CLEANUP_TASKS_INIT_LOCK:
+            if _CLEANUP_TASKS is None:
+                import cleanup_tasks
+                _CLEANUP_TASKS = cleanup_tasks.CleanupTasks(
+                    operation_lock=LOCK, preflight=lambda: _cleanup_preflight(),
+                    worker=lambda action, payload, progress: cleanup_action(action, payload, progress=progress))
+    return _CLEANUP_TASKS
+
+
+def _start_cleanup(action, payload):
+    # Capture this job's immutable data root; later status/root changes cannot retarget it.
+    root = Path(xg_paths.DATA).absolute()
+    return _cleanup_tasks().submit(
+        action, payload, scope=str(root),
+        worker=lambda selected_action, selected_payload, progress: cleanup_action(
+            selected_action, selected_payload, progress=progress, data_root=root))
+
+
+def cleanup_action(action, payload, *, progress=None, data_root=None):
+    """Synchronous body: only called by an authenticated worker holding API LOCK."""
     if not isinstance(payload, dict):
         return {"ok": False, "error_code": "bad_request", "message": "清理请求格式无效"}
     if action not in {"preview", "execute", "restore-preview", "restore", "purge-preview", "purge"}:
         return {"ok": False, "error_code": "unknown_action", "message": "未知维护操作"}
-    service = _cleanup_service()
+    service = _cleanup_service() if data_root is None else _cleanup_service(data_root)
+    if progress is not None:
+        service.set_progress(progress)
+    try:
+        return _cleanup_apply(service, action, payload)
+    finally:
+        if progress is not None:
+            service.set_progress(None)
+
+
+def _cleanup_apply(service, action, payload):
     if action == "preview":
         selection = payload.get("selection")
         if not isinstance(selection, dict):
@@ -598,6 +639,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403, {"error": "forbidden"})
 
         api = path[len("/xiaoguang"):] if path.startswith("/xiaoguang") else path
+        if api == "/api/wizard/cleanup/task":
+            if not self.same_origin():
+                return self.reply(403, {"error": "origin"})
+            result = _cleanup_tasks().lookup(
+                task_id=q.get("task_id", [None])[0],
+                request_id=q.get("request_id", [None])[0], action=q.get("action", [None])[0])
+            return self.reply(200 if result.get("ok") else
+                              (404 if result.get("error_code") == "task_not_found" else 400), result)
         if api.startswith("/api/service-account/"):
             import xg_service_identity
             busy = bool(xg_proc.find_script("bot/long_runner.py") or chat_running())
@@ -735,16 +784,13 @@ class Handler(BaseHTTPRequestHandler):
             _request_shutdown("api_quit")
             return self.reply(200, {"ok": True, "message": "小光和后台正在退出，可以关掉这个页面了。"})
 
+        if api.startswith("/api/wizard/cleanup/"):
+            result = _start_cleanup(api[len("/api/wizard/cleanup/"):], data)
+            return self.reply(200 if result.get("ok") else 409, result)
+
         if not LOCK.acquire(blocking=False):
             return self.reply(409, {"error": "busy", "message": "上一个操作还没完成"})
         try:
-            if api.startswith("/api/wizard/cleanup/"):
-                try:
-                    r = cleanup_action(api[len("/api/wizard/cleanup/" ):], data)
-                except Exception:
-                    r = {"ok": False, "error_code": "cleanup_internal",
-                         "message": "数据维护失败；未确认的文件不会被主动覆盖，请重新预览检查回收区"}
-                return self.reply(200 if r.get("ok") else 409, r)
             if api == "/chat/trigger":
                 # Keep legacy all-chat mode readable/writable; the desktop only
                 # exposes explicit-prefix replies. Never coerce an empty prefix.

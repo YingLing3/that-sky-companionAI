@@ -70,7 +70,8 @@ class GenerationTests(unittest.TestCase):
         self.assertFalse(v['ready']);self.assertEqual(v['code'],'props_generated_counts_mismatch')
     def test_unknown_apk_preserves_previous(self):
         self.make();before=self.snapshot()
-        with self.assertRaisesRegex(gen.PropGenerationError,'当前 APK'):gen.generate(self.apk,self.output)
+        with self.assertRaises(gen.PropGenerationError) as caught:gen.generate(self.apk,self.output)
+        self.assertEqual(caught.exception.code,'apk_bad_zip')
         self.assertEqual(self.snapshot(),before)
         self.assertFalse(list(self.output.parent.glob('.props-build-*')))
     def test_build_exception_preserves_previous(self):

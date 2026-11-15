@@ -5,6 +5,8 @@ import json
 import sys
 import tempfile
 import threading
+import time
+import uuid
 import unittest
 from unittest.mock import patch, Mock
 
@@ -33,7 +35,7 @@ class CleanupApiTests(unittest.TestCase):
         cls.thread.join(5)
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='xg-reset-api-')
+        self.temp = tempfile.TemporaryDirectory(prefix='xg-reset-api-', dir=ROOT/'tests')
         self.addCleanup(self.temp.cleanup)
         self.data = Path(self.temp.name)
         self.terrain = self.data/'game/0.16.8-421629/terrain'
@@ -47,6 +49,7 @@ class CleanupApiTests(unittest.TestCase):
         self.patches = [patch.object(api.xg_paths, 'DATA', self.data),
                         patch.object(api, '_CLEANUP_SERVICE', None),
                         patch.object(api, '_CLEANUP_ROOT', None),
+                        patch.object(api, '_CLEANUP_TASKS', None),
                         patch.object(api, '_cleanup_online', self.online),
                         patch.object(api, '_cleanup_busy', self.busy),
                         patch.object(api.wizard, 'after_data_reset', self.after_reset)]
@@ -55,18 +58,34 @@ class CleanupApiTests(unittest.TestCase):
             self.addCleanup(item.stop)
 
     def request(self, action, payload=None, *, auth=True, origin=None):
+        # Preserve original destructive/assertion contract by awaiting only inside this test helper.
         headers = {'Content-Type':'application/json',
                    'Origin':origin or f'http://127.0.0.1:{self.port}'}
         if auth:
             headers['Cookie'] = api.COOKIE+'=synthetic-local-test-token'
-        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
-        try:
-            conn.request('POST', '/xiaoguang/api/wizard/cleanup/'+action,
-                         json.dumps(payload or {}).encode(), headers)
-            response=conn.getresponse()
-            return response.status,json.loads(response.read())
-        finally:
-            conn.close()
+        body = dict(payload or {})
+        body.setdefault('request_id', uuid.uuid4().hex)
+        def transport(method, route, data=None):
+            conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=3)
+            try:
+                conn.request(method, route, json.dumps(data).encode() if data is not None else None, headers)
+                response=conn.getresponse()
+                return response.status,json.loads(response.read())
+            finally:
+                conn.close()
+        status, doc = transport('POST', '/xiaoguang/api/wizard/cleanup/'+action, body)
+        if status != 200 or not doc.get('task_id'):
+            return status, doc
+        deadline = time.monotonic() + 5
+        while True:
+            status, state = transport('GET', '/xiaoguang/api/wizard/cleanup/task?task_id='+doc['task_id'])
+            self.assertEqual(status,200,state)
+            task = state['task']
+            if not task['running']:
+                result = task['result']
+                return (200 if result.get('ok') else 409), result
+            self.assertLess(time.monotonic(), deadline, state)
+            threading.Event().wait(0.005)
 
     def preview(self):
         status,doc=self.request('preview', {'selection':self.selection})

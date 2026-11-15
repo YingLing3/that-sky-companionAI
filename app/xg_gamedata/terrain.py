@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -30,13 +29,17 @@ BUILDER = TERRAIN_DIR / "terrain_build.py"
 PROGRESS_RE = re.compile(r"\[(?P<stage>[a-zA-Z_-]+)\s+(?P<done>\d+)/(?P<total>\d+)\]\s*(?P<msg>.*)")
 
 
-def ensure_pipeline() -> None:
+def _node_executable(value=None) -> str:
+    paths=xg_paths()
+    try:return paths.require_node_exe(value)
+    except paths.NodeResolutionError as exc:
+        raise GameDataError(exc.message,exc.code) from exc
+
+
+def ensure_pipeline() -> str:
     if not BUILDER.is_file() or not (TERRAIN_DIR / "pipeline").is_dir():
         raise GameDataError("地形流水线文件缺失：%s（安装包不完整）" % TERRAIN_DIR, "terrain_pipeline_missing")
-    node = shutil.which("node")
-    if not node:
-        raise GameDataError("没找到 Node.js。地形生成需要 Node（建议 20+），装好后重试。",
-                            "node_missing")
+    return _node_executable()
 
 
 def _maps(value: str | None) -> list[str] | None:
@@ -52,8 +55,9 @@ def _maps(value: str | None) -> list[str] | None:
 
 def run(apk: Path, data: Path, maps: list[str] | None, resume: bool, workers: int,
         progress: Progress) -> dict:
-    ensure_pipeline()
-    inspect_apk(apk, progress=None)
+    node=ensure_pipeline()
+    if not isinstance(node,str):node=_node_executable()
+    inspect_apk(apk, progress=None, consumers=("terrain",), expected_build=421629)
     root = game_dir(data) / "terrain"
     assets = root / "assets"
     catalog = root / "multimap-catalog.json"
@@ -76,7 +80,7 @@ def run(apk: Path, data: Path, maps: list[str] | None, resume: bool, workers: in
     except Exception:
         out_arg, catalog_arg, summary_arg, work_arg = map(str, (assets, catalog, summary, work))
     cmd = [sys.executable, "-X", "utf8", "-B", str(BUILDER),
-           "--apk", str(apk), "--out", out_arg,
+           "--apk", str(apk), "--out", out_arg, "--node", node,
            "--catalog", catalog_arg, "--summary", summary_arg,
            "--work", work_arg, "--workers", str(workers),
            "--progress-maps", ",".join(counted_maps)]
@@ -85,7 +89,7 @@ def run(apk: Path, data: Path, maps: list[str] | None, resume: bool, workers: in
     if resume or (assets / "catalog.json").exists():
         cmd += ["--resume"]
     env = dict(os.environ)
-    env.update({"PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"})
+    env.update({"XG_NODE":node,"PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"})
     started = time.monotonic()
     total = len(counted_maps)
     progress.emit("启动地形流水线（%s 张）…" % total, done=0, total=total, force=True)

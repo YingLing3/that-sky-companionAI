@@ -1,10 +1,11 @@
 """Build local, auditable map assets from an explicitly selected APK. No game I/O."""
 from __future__ import annotations
-import argparse, hashlib, json, os, re, shutil, tempfile, zipfile
+import argparse, hashlib, json, os, re, tempfile, zipfile
 from pathlib import Path, PurePosixPath
 from collections import Counter
 import numpy as np
 from .formats import read_mesh, read_meshes, NodeMeshoptDecoder, DEFAULT_LIMITS, FormatError
+import xg_paths
 from .scene import Scene
 from .assembly import assemble_initial_static
 
@@ -28,6 +29,7 @@ def save_json(path,obj):atomic(path,json.dumps(obj,ensure_ascii=False,indent=2,a
 
 def build_map(apk, map_name, output, *, node, meshopt, profile=None):
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',map_name):raise ValueError('invalid_map_name')
+    node=xg_paths.require_node_exe(node)
     output=Path(output).resolve();output.mkdir(parents=True,exist_ok=True)
     decoder=NodeMeshoptDecoder(node,meshopt)
     sources={};cache={}
@@ -110,9 +112,12 @@ def build_map(apk, map_name, output, *, node, meshopt, profile=None):
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--apk',required=True,type=Path);p.add_argument('--map',required=True,dest='map_name')
-    p.add_argument('--out',required=True,type=Path);p.add_argument('--node',default=shutil.which('node') or 'node')
+    p.add_argument('--out',required=True,type=Path);p.add_argument('--node',default=None)
     p.add_argument('--profile',help='Explicit native version profile; required for baked collision projection')
     p.add_argument('--meshopt',type=Path,default=Path(__file__).resolve().parents[2]/'engine/node_modules/meshoptimizer/meshopt_decoder.mjs')
-    a=p.parse_args(argv);print(json.dumps(build_map(a.apk,a.map_name,a.out,node=a.node,meshopt=a.meshopt,profile=a.profile),ensure_ascii=False,indent=2))
+    a=p.parse_args(argv)
+    try:a.node=xg_paths.require_node_exe(a.node)
+    except xg_paths.NodeResolutionError as exc:p.error(f'{exc.code}: {exc.message}')
+    print(json.dumps(build_map(a.apk,a.map_name,a.out,node=a.node,meshopt=a.meshopt,profile=a.profile),ensure_ascii=False,indent=2))
 
 if __name__=='__main__':main()

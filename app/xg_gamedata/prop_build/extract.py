@@ -198,16 +198,7 @@ def build_all_index(z,apk_identity,out_dir,*,primary_index=None,progress=None):
             if d.get('family')=='Mesh':
                 declarations.setdefault(d['name'],[]).append(dict(d,table_member=path))
     outfit_rows={};outfits_by_name=defaultdict(list)
-    for path in sorted(n for n in z.namelist() if Path(n).name.lower().startswith(('outfitdefs','outfittransform')) and n.endswith('.json')):
-        raw=member(z,path);items=json.loads(raw);input_hashes[path]=digest(raw)
-        related.append({'path':path,'sha256':digest(raw),'records':len(items),'role':'outfit_reference_not_placed_mesh_binding'})
-        for index,item in enumerate(items):
-            if not isinstance(item,dict):continue
-            name=item.get('name')
-            if isinstance(name,str):
-                key=path+'#'+str(index);outfit_rows[key]={'name':name,'mesh':item.get('mesh'),
-                    'type':item.get('type'),'abilities':item.get('abilities'),'source':path,'index':index}
-                outfits_by_name[name].append(key)
+    # Outfit associations were audit-only and are not used by the runtime catalog.
     used_declarations={};mesh_cache={};raw_assets={};records=[];runtime={};runtime_total=0
     for number,base in enumerate(rows,1):
         if progress:progress({"stage":"extract","current":number,"total":len(rows),"name":base["name"]})

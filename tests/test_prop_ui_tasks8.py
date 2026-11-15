@@ -59,8 +59,15 @@ class PropsTaskTests(unittest.TestCase):
         common.game_dir=lambda data:Path(data)/'game/fixture-version'
         common.resolve_data=lambda _:self.root
         generator=types.ModuleType('xg_gamedata.props');generator.generate=generate
+        class PropError(RuntimeError):
+            def __init__(self,code,message=None):
+                self.code=str(code)
+                super().__init__(message or self.code)
+        generator.PropGenerationError=PropError
         class Error(Exception):
-            def __init__(self,msg,code):self.code=code
+            def __init__(self,msg,code):
+                self.code=code;self.message=msg
+                super().__init__(msg)
         ns=subset('xg_gamedata/__main__.py',{'cmd_props'},{'__name__':'xg_gamedata.__main__','__package__':'xg_gamedata',
                   'GameDataError':Error,'final':lambda ok,**kw:rows.append({'ok':ok,**kw})})
         with mock.patch.dict(sys.modules,{'xg_gamedata.common':common,'xg_gamedata.props':generator}):
@@ -81,6 +88,7 @@ class PropsTaskTests(unittest.TestCase):
         call=mock.Mock(return_value={'ok':True,'ready':3,'known':8})
         code,rows=self.cli(False,call)
         self.assertEqual(code,0);self.assertEqual(rows[-1]['props']['count'],3)
+        call.assert_called_once()
         self.assertEqual(call.call_args.kwargs['output_dir'],self.props)
 
     def test_cli_parser_requires_apk_and_supports_independent_output(self):

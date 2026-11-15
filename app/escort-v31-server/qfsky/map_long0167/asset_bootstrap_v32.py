@@ -17,6 +17,7 @@ import struct
 from types import MappingProxyType
 
 from qfsky.join0167_profile import LoadedProfile, account_binding, NATIVE_SHA256
+from qfsky.apk_resource_identity import resource_provenance_matches as _match_resource_provenance
 from qfsky.long0167.level_authority import LevelRecord
 from qfsky.long0167.actor_codec.actor_wire_0167 import inspect_actor_wire, reencode_actor_wire
 from . import catalog_account_pins as _catalog_pins
@@ -47,6 +48,12 @@ _PHASES = {
         'native_constructor_with_selected_OnLevelLoad_and_finite_initializers'),
 }
 _SEAL = object()
+
+
+def _resource_provenance_matches(provenance, *, native_sha256=None):
+    return _match_resource_provenance(
+        provenance, native_sha256=NATIVE_SHA256 if native_sha256 is None else native_sha256,
+        reference_directory_sha256=APK_DIRECTORY_SHA, scope='catalog')
 
 
 def _fail(code):
@@ -295,7 +302,7 @@ def _placement(p, m):
             prov.get('entry_type') != 'LevelLink' or prov.get('entry_object_index') != 4992 or
             prov.get('transform_object_index') != 5366 or prov.get('link_name') != 'NightArchiveEntrance' or
             prov.get('source_member_sha256') != MEMBER_SHA or
-            prov.get('apk_archive_directory_sha256') != APK_DIRECTORY_SHA or
+            not _resource_provenance_matches(prov) or
             prov.get('native_sha256') != NATIVE_SHA256 or
             prov.get('support', {}).get('triangle_id') != 1525 or
             prov.get('support', {}).get('normal_y') != 0.9999999970989094 or
@@ -335,7 +342,7 @@ def _scene_proof(p, m, observed, cache, wire):
     prov = p.get('provenance', {})
     if (prov.get('native_sha256') != NATIVE_SHA256 or prov.get('apk_build') != 421629 or
             prov.get('scene_member_sha256') != MEMBER_SHA or
-            prov.get('apk_archive_directory_sha256') != APK_DIRECTORY_SHA or
+            not _resource_provenance_matches(prov) or
             prov.get('scene_member') != 'assets/Data/Levels/NightArchive/Objects.level.bin' or
             prov.get('runtime_capture') is not False or prov.get('native_record_comparison') is not False):
         _fail('scene_asset_provenance')

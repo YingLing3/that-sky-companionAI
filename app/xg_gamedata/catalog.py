@@ -256,6 +256,7 @@ def _placement_evidence(proof: dict, placement: dict, profile: dict) -> None:
         raise GameDataError(
             "落点包 %s 的 placement 版本是 %r，不是当前 %s。" % (scene, declared_build, label),
             "placement_version")
+    # pprov is the shipped placement REFERENCE, not the channel APK's actual directory.
     if (pprov.get("native_sha256") != profile["native_sha256"]
             or pprov.get("apk_archive_directory_sha256") != profile["apk_directory_sha256"]):
         raise GameDataError(
@@ -368,7 +369,7 @@ def build(apk: Path, account_id: str, data: Path, scene_inputs: str | None,
     account = _account(xg, account_id)
     uuid, binding = account["uuid"], account["binding"]
     from .apk import inspect_apk
-    apk_info = inspect_apk(apk, progress=None)
+    apk_info = inspect_apk(apk, progress=None, consumers=("catalog",), expected_build=APK_BUILD)
     profiles = read_json(Path(xg.PROFILES_JSON), {}) or {}
     if not isinstance(profiles.get("maps"), dict):
         raise GameDataError("本机连接配置缺失/损坏：%s" % xg.PROFILES_JSON, "profiles_config")
@@ -393,7 +394,8 @@ def build(apk: Path, account_id: str, data: Path, scene_inputs: str | None,
     spawn_loader.require_apk_evidence(
         pack, native_sha256=apk_info["native_sha256"],
         apk_archive_directory_sha256=apk_info["apk_archive_directory_sha256"],
-        build=profile["build"])
+        build=profile["build"],
+        resource_identity_sha256=apk_info["consumer_sha256"]["catalog"])
     cache_dir = Path(scene_inputs) if scene_inputs else game_dir(data) / "catalog-inputs"
     progress.emit("准备场景输入（%d 张，缺的从 APK 现场生成）…" % len(pack["placements"]),
                   done=0, total=len(pack["placements"]) + 10)
@@ -429,7 +431,11 @@ def build(apk: Path, account_id: str, data: Path, scene_inputs: str | None,
         total = len(scenes)
         for idx, scene in enumerate(sorted(scenes)):
             item = scenes[scene]
-            proof = item["proof"]
+            proof = dict(item["proof"])
+            proof["provenance"] = dict(proof.get("provenance") or {})
+            # _scene_inputs rechecked every actual scene SHA before rebinding this channel's evidence.
+            from .apk_identity import resource_provenance
+            proof["provenance"].update(resource_provenance(apk_info, "catalog"))
             map_id = int(proof["map_id"])
             placement, placement_raw = _placement(pack, scene, map_id)
             # 落点包必须与本次 APK 的版本证据/场景成员一一对上；不再把落点包的
