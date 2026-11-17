@@ -1,7 +1,7 @@
 {
   "base_version": "1.0.5",
-  "release": "1.0.5-desktop-ui.10.2-terrainfix.15",
-  "client_revision": "r10.2-terrainfix.15",
+  "release": "1.0.5-desktop-ui.10.2-terrainfix.16",
+  "client_revision": "r10.2-terrainfix.16",
   "frontend": "Twilight cloud-sea redesign (night/dawn themes, starfield, motion layer) over preserved r9 controls and APIs",
   "baseline_source_commit": "78f1d73e7b3e73b3f32d0d706405346dc196c590",
   "current_revision_verification": {
@@ -15,8 +15,8 @@
     "exe_host_rebuilt": false,
     "exe_host_reused_from_revision": "r9",
     "private_server_modified_in_this_patch": false,
-    "source_unittest_cases_run": 1124,
-    "source_unittest_cases_passed": 1123,
+    "source_unittest_cases_run": 1137,
+    "source_unittest_cases_passed": 1136,
     "source_unittest_cases_failed": 0,
     "source_unittest_cases_skipped": 1
   },
@@ -75,7 +75,7 @@
     "compact_960x640_checked": true,
     "packaged_window_tested": false
   },
-  "previous_package_release": "1.0.5-desktop-ui.10.2-terrainfix.14",
+  "previous_package_release": "1.0.5-desktop-ui.10.2-terrainfix.15",
   "terrain_generation_patch": {
     "revision": "terrainfix.1",
     "date": "2026-11-11",
@@ -1300,6 +1300,39 @@
       "failing_modules": []
     },
     "summary": "主人离地高度按主人自身骨骼计算、身高公式六点重拟合；清理数据放行大地形清单/跳跃记录；写配置被拒时重试并就地写入；录制认号忽略已删除记录并优先当前号，登记失败原因显示在界面。",
+    "finished_by": "Claude",
+    "deployed": false,
+    "published": false,
+    "readme_unchanged": true
+  },
+  "inherited_terrainfix15_verification": {
+    "source_tests_status": "completed_with_missing_input_skip",
+    "all_source_tests_passed": true,
+    "all_source_tests_executed": false,
+    "candidate_live_game_retested": false,
+    "new_archive_live_login_retested": false,
+    "backend_smoke_passed": false,
+    "external_services_used": false,
+    "exe_host_rebuilt": false,
+    "exe_host_reused_from_revision": "r9",
+    "private_server_modified_in_this_patch": false,
+    "source_unittest_cases_run": 1124,
+    "source_unittest_cases_passed": 1123,
+    "source_unittest_cases_failed": 0,
+    "source_unittest_cases_skipped": 1
+  },
+  "terrainfix_16": {
+    "date": "2026-11-18",
+    "release": "1.0.5-desktop-ui.10.2-terrainfix.16",
+    "tests": {
+      "modules": 59,
+      "run": 1137,
+      "failed": 0,
+      "skipped": 1,
+      "passed": 1136,
+      "failing_modules": []
+    },
+    "summary": "八人门改名并新增彩虹日/奥利奥两个落点（旧目录提示重新构建、无需重录）；目录校验自带 overlay 导入路径，缺模块单独报 catalog_import_failed；地形生成与上线前检查 Node 依赖；续跑自动重试失败地图；目录校验失败在界面显示错误码。",
     "finished_by": "Claude",
     "deployed": false,
     "published": false,

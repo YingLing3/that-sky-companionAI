@@ -168,6 +168,10 @@ def start(map_id=None, hours=3.0, join=None, wait=60.0, account=None, capture_on
     rows = runner_rows()
     if rows:
         return {"ok": False, "message": "长连接已在运行", "pid": rows[0]["pid"]}
+    try:
+        xg_paths.require_engine_deps(xg_paths.ENGINE, "走路引擎")
+    except xg_paths.NodeResolutionError as exc:
+        return {"ok": False, "code": exc.code, "message": exc.message}
     deadline = int(time.time() + float(hours) * 3600)
     xg_paths.write_json(xg_paths.CONTROL / "escort_travel.enabled.json",
                         {"enabled": True, "session_deadline": deadline, "version": 1})

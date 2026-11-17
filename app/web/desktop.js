@@ -156,10 +156,22 @@ function catalogView(summary, envelope, error='') {
       message:'千鸟城落点已更新，需要重新构建地图目录',
       detail:'点“构建地图目录”更新落点；已有当前版本的有效遇境录制无需重采，主出生点保持原义。', progress:null};
   }
+  if (certificate?.code === 'catalog_variants_incomplete' && certificate.certified !== true
+      && summary?.account && String(certificate.account || '') === String(summary.account)) {
+    return {state:'waiting', title:'地图落点已更新',
+      message:certificate.message || '地图落点有更新，需要重新构建地图目录',
+      detail:'点“构建地图目录”即可；已有当前版本的有效遇境录制无需重采，也不需要逐张跑图。', progress:null};
+  }
   const ready = certifiedCatalog(summary);
   if (ready) return {state:'success', title:'地图目录构建成功 · 校验通过',
     message:ready.maps !== null ? `${ready.maps} 张地图${ready.variants ? ` + ${ready.variants} 个独立落点` : ''}已就绪。` : '本账号的地图目录已就绪。',
     detail:'无需逐张进图。继续完成 AI、人设等设置，然后点“完成安装设置”。', progress:{value:100,label:'100%'}};
+  const failedCheck = certificate && certificate.certified !== true && certificate.code
+    && !['catalog_missing', 'account_required', 'catalog_checking'].includes(certificate.code)
+    && String(certificate.account || '') === String(summary?.account || '');
+  if (relevant && task.ok === true && failedCheck) return {state:'error', title:'目录已生成 · 校验未通过',
+    message:certificate.message || '当前账号的地图目录没有通过校验。',
+    detail:'错误码：' + certificate.code + ' · 请刷新状态；持续出现时把错误码发给维护者。', progress:null};
   if (relevant && task.ok === true) return {state:'waiting', title:'目录已生成 · 等待校验确认',
     message:'任务已结束，但还没有通过当前账号的完整性校验；此时不算构建成功。', detail:'请刷新状态，持续未确认时重试构建。', progress:null};
   return {state:'idle', title:'地图目录尚未构建完成', message:'遇境采集成功后，点“构建地图目录”。生成和校验都会在电脑上自动完成。',

@@ -43,6 +43,12 @@ if not os.environ.get("XG_DATA_DIR"):
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(_APP))
 sys.path.insert(0, str(_APP / "launcher"))
+# 与 runner 同序：overlay（asset_catalog_v32c / catalog_account_pins）和地形源码
+# 必须在第一次 import qfsky 之前就在路径里，否则 extend_path 合并不到 overlay。
+if (_APP / "src").is_dir():
+    sys.path.append(str(_APP / "src"))
+if (_APP / "escort-v31-server").is_dir():
+    sys.path.insert(0, str(_APP / "escort-v31-server"))
 
 import map_catalog                                # noqa: E402  地图清单
 import owner_title                                # noqa: E402

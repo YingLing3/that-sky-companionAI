@@ -24,6 +24,8 @@ import xg_exec
 REBUILD_MESSAGE = "目录需要用当前版本重新录制遇境后重建"
 QIANNIAOCHENG_STALE_CODE = "catalog_qianniaocheng_stale"
 QIANNIAOCHENG_REBUILD_MESSAGE = "千鸟城落点已更新，需要重新构建地图目录"
+VARIANTS_STALE_CODE = "catalog_variants_incomplete"
+VARIANTS_REBUILD_MESSAGE = "地图落点有更新（如八人门彩虹日/奥利奥），需要重新构建地图目录"
 CHECKING_CODE = "catalog_checking"
 CHECKING_MESSAGE = "正在后台校验当前账号的地图目录，请稍候"
 MAX_CACHED_RESULTS = 32
@@ -137,6 +139,14 @@ def _runtime_check(request):
 
 def _failure(row, exc):
     result = dict(row)
+    if isinstance(exc, ImportError):
+        # 程序文件缺失/导入路径不对，不是目录本身坏了：别让用户反复重录重建。
+        name = getattr(exc, "name", None) or ""
+        name = name if re.fullmatch(r"[A-Za-z0-9_.]{1,80}", name) else ""
+        result.update(state="invalid", code="catalog_import_failed",
+                      message="校验程序缺少模块%s，请重新解压完整客户端（源码运行请检查安装目录完整）"
+                      % ("（%s）" % name if name else ""))
+        return result
     code = getattr(exc, "code", None) or str(exc)
     if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", code):
         code = "catalog_runtime_invalid"
@@ -144,13 +154,40 @@ def _failure(row, exc):
         result.update(state="stale", code=code, message=REBUILD_MESSAGE)
     elif code == QIANNIAOCHENG_STALE_CODE:
         result.update(state="stale", code=code, message=QIANNIAOCHENG_REBUILD_MESSAGE)
+    elif code == VARIANTS_STALE_CODE:
+        result.update(state="stale", code=code, message=VARIANTS_REBUILD_MESSAGE)
+    elif code == "catalog_import_failed":
+        result.update(state="invalid", code=code,
+                      message="校验程序缺少模块，请重新解压完整客户端（源码运行请检查安装目录完整）")
     else:
         result.update(state="invalid", code=code, message=REBUILD_MESSAGE)
     return result
 
 
+def _ensure_qfsky_paths(xg=None):
+    """Self-contained import setup, independent of how the calling process was started.
+
+    qfsky / qfsky.map_long0167 merge the overlay with pkgutil.extend_path, which only
+    sees directories present at first import. If qfsky was imported earlier without the
+    overlay, add the overlay directories to the live package __path__ as well."""
+    xg = xg or xg_paths
+    overlay = Path(xg.OVERLAY)
+    for item in reversed((str(overlay), str(xg.QFSKY_CODE.parent), str(xg.BOT_CODE))):
+        if item not in sys.path:
+            sys.path.insert(0, item)
+    src = getattr(xg, "SRC", None)
+    if src is not None and str(src) not in sys.path and Path(src).is_dir():
+        sys.path.append(str(src))
+    for name, sub in (("qfsky", overlay / "qfsky"), ("qfsky.map_long0167", overlay / "qfsky/map_long0167")):
+        module = sys.modules.get(name)
+        path = getattr(module, "__path__", None)
+        if path is not None and sub.is_dir() and str(sub) not in list(path):
+            path.append(str(sub))
+
+
 def _qianniao_precheck(manifest, folder):
     """Only reject stale named placement; never certify account/capture readiness."""
+    _ensure_qfsky_paths()
     variants = manifest.get("variants") or {}
     if not isinstance(variants, dict):
         raise ValueError("catalog_variants_invalid")
@@ -211,6 +248,7 @@ def _background_check(scope, key, job, request, xg, folder, before, row):
 
 
 def certify(data, account, account_uuid, profile=None):
+    _ensure_qfsky_paths()
     from qfsky.version_profile import CURRENT_BUILD, profile_for_build
     profile = dict(profile or profile_for_build(CURRENT_BUILD))
     row = {"account": str(account or ""), "certified": False, "state": "missing",
@@ -296,7 +334,7 @@ if __name__ == "__main__":
         checked = _verify_request(request)
         output = {"ok": True, "checked": checked}
     except Exception as exc:
-        code = getattr(exc, "code", None) or str(exc)
+        code = "catalog_import_failed" if isinstance(exc, ImportError) else (getattr(exc, "code", None) or str(exc))
         if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", code):
             code = "catalog_runtime_invalid"
         output = {"ok": False, "code": code}

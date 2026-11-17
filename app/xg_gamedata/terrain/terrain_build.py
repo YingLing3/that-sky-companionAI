@@ -479,7 +479,8 @@ def base_stage(apk: Path, work: Path, maps: list[str], all_scenes: list[str],
     if set(maps) != set(all_scenes):
         cmd += ["--maps", *maps]
     if (out / "catalog.json").exists():
-        cmd += ["--resume"]
+        # 续跑也重试上次失败的图：失败多半是环境问题（缺依赖、超时），修好后应自动补上。
+        cmd += ["--resume", "--retry-failed"]
     env = dict(os.environ, XG_NODE=node, PYTHONPATH=str(SRC), PYTHONDONTWRITEBYTECODE="1",
                PYTHONIOENCODING="utf-8", SKYTERRAIN_REQUIRED_ONLY="1")
 
@@ -1232,7 +1233,9 @@ def main(argv=None):
     parser.add_argument("--fresh-nav-reports", action="store_true",
                         help="用本机新生成的 nav-build 报告（catalog 不再是 v13 钉值 sha）")
     args = parser.parse_args(argv)
-    try:args.node=xg_paths.require_node_exe(args.node)
+    try:
+        args.node=xg_paths.require_node_exe(args.node)
+        xg_paths.require_engine_deps(PIPELINE / "engine", "地形生成引擎")
     except xg_paths.NodeResolutionError as exc:parser.error(f"{exc.code}: {exc.message}")
     if not 30 <= args.timeout <= 900:
         parser.error("--timeout 必须在 30..900 之间")

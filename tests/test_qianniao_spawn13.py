@@ -1,4 +1,4 @@
-"""Independent terrainfix.15 landing pins/privacy regressions; no live account data."""
+"""Independent terrainfix.16 landing pins/privacy regressions; no live account data."""
 from __future__ import annotations
 import ast
 import hashlib
@@ -10,7 +10,7 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
 APP=ROOT/'app'
-VERSION='1.0.5-desktop-ui.10.2-terrainfix.15'
+VERSION='1.0.5-desktop-ui.10.2-terrainfix.16'
 SCENE='SunsetEnd2'
 VARIANT='qianniaocheng'
 MAP_ID=507487826

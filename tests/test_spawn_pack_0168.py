@@ -141,7 +141,7 @@ class PlacementValidationTests(unittest.TestCase):
                 with self.subTest(scene=scene + "/" + name):
                     C._placement(placement, placement_entry(placement))
                     count += 1
-        self.assertEqual(count, 116)
+        self.assertEqual(count, 118)
 
     def test_0168_pack_rejected_with_legacy_constants(self):
         pack = spawn_loader.load(build=421629)
@@ -188,7 +188,7 @@ class SceneMemberEvidenceTests(unittest.TestCase):
                 with self.subTest(scene=scene + "/" + name):
                     catalog._placement_evidence(proof, placement, PROFILES[421629])
                     checked += 1
-        self.assertEqual(checked, 116)
+        self.assertEqual(checked, 118)
 
 
 if __name__ == "__main__":

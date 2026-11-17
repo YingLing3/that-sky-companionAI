@@ -15,6 +15,32 @@
   },
   {
    "aliases": [
+    "彩虹日",
+    "彩虹日（八人门）",
+    "rainbowday"
+   ],
+   "id": "landmark:rainbowday",
+   "map_id": 2394719185,
+   "position": null,
+   "resource_cost": 0,
+   "scene": "DayHubCave",
+   "variant": "rainbowday"
+  },
+  {
+   "aliases": [
+    "奥利奥",
+    "奥利奥（八人门）",
+    "oreo"
+   ],
+   "id": "landmark:oreo",
+   "map_id": 2394719185,
+   "position": null,
+   "resource_cost": 0,
+   "scene": "DayHubCave",
+   "variant": "oreo"
+  },
+  {
+   "aliases": [
     "AR_Bedroom",
     "scene:AR_Bedroom",
     "AR卧室（内部场景）",
@@ -200,6 +226,10 @@
   },
   {
    "aliases": [
+    "八人门",
+    "云野：八人门",
+    "云野:八人门",
+    "云野：八人门（DayHubCave）",
     "DayHubCave",
     "云野：中央神坛",
     "云野：中央神坛（DayHubCave）",

@@ -265,6 +265,42 @@ def require_node_exe(value=None) -> str:
     return _resolve_node(value)
 
 
+# 某个依赖包里必须存在的文件（只装了一半时 package.json 在、关键文件不在）。
+_ENGINE_DEP_FILES = {"meshoptimizer": "meshopt_decoder.mjs"}
+TERRAIN_ENGINE = APP / "xg_gamedata/terrain/pipeline/engine"
+
+
+def engine_deps_missing(engine_dir) -> list:
+    """List lock-file dependencies absent from <engine_dir>/node_modules (cheap file checks)."""
+    engine_dir = Path(engine_dir)
+    try:
+        deps = json.loads((engine_dir / "package.json").read_text(encoding="utf-8")).get("dependencies") or {}
+    except (OSError, ValueError):
+        return []          # 没有清单的旧布局：不在这里拦，交给真正启动时报错
+    missing = []
+    for name in sorted(deps):
+        pkg = engine_dir / "node_modules" / name
+        need = _ENGINE_DEP_FILES.get(name, "package.json")
+        if not (pkg / "package.json").is_file() or not (pkg / need).is_file():
+            missing.append(name)
+    return missing
+
+
+def require_engine_deps(engine_dir, purpose: str) -> None:
+    """Fail fast with a Chinese hint instead of a late worker crash / per-map failure."""
+    missing = engine_deps_missing(engine_dir)
+    if not missing:
+        return
+    try:
+        rel = Path(engine_dir).resolve().relative_to(INSTALL_ROOT.resolve()).as_posix()
+    except (OSError, ValueError):
+        rel = str(engine_dir)
+    raise NodeResolutionError(
+        "engine_deps_missing",
+        "%s缺少 Node 依赖：%s。便携包请重新解压完整客户端；源码运行请在安装目录执行 npm ci --prefix %s"
+        % (purpose, "、".join(missing), rel))
+
+
 def node_exe() -> str:
     """Compatibility API: absolute usable Node path, or an empty string."""
     try:

@@ -197,7 +197,7 @@ class RuntimeSceneProofTests(unittest.TestCase):
                 entry={'scene':value['scene'],'level_id':value['map_id'],
                        'placement_sha256':digest(canonical(value)),'netversion_u16':[0]*6}
                 C._placement(value,entry)
-        self.assertEqual(len(items),116)
+        self.assertEqual(len(items),118)
 
     def test_placement_new_identity_does_not_hide_wrong_subset(self):
         value=copy.deepcopy(next(iter(spawn_loader.load(build=421629)['placements'].values())))
