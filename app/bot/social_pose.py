@@ -10,7 +10,9 @@
 模板 = 接受方“接受前一帧”与“进入状态那一帧”，用 candle_pose 的字段级移植只搬这几个字段，再把对象 slot 换成邀请方。
 """
 import json
+import math
 import os
+from dataclasses import dataclass
 import struct
 from pathlib import Path
 
@@ -242,6 +244,49 @@ ORIGIN_PER_UNIT = 0.01678
 ORIGIN_ZERO_Y = 127.52
 ORIGIN_MIN, ORIGIN_MAX = 0.02, 2.0
 DEFAULT_ORIGIN = 0.5
+CHIBI_MASK_ID = 2954671753          # 小矮人面具 CharSkyKid_Mask_BasicQ
+# 同为 ChibiOutfit 的面具：小矮人面具、回归童真面具（CharSkyKid_Mask_ChildrenWhiteEyelash）
+CHIBI_MASK_IDS = frozenset((2954671753, 1105594441))
+# One paired 0.16.8 capture: ground 0.258 / 0.718 = 0.359;
+# standing foot codes give (127.52 - 112) / (127.52 - 85) = 0.365.
+CHIBI_SCALE = 0.36
+CHIBI_SCALE_MIN = 0.1
+
+
+def configured_chibi_scale():
+    try:
+        scale = float(os.environ.get("SKY_CHIBI_SCALE", CHIBI_SCALE))
+    except ValueError:
+        return CHIBI_SCALE
+    return scale if CHIBI_SCALE_MIN <= scale <= 1.0 else CHIBI_SCALE
+
+
+@dataclass(frozen=True)
+class BodyOriginProfile:
+    recorded: float
+    normal: float
+    chibi: float
+
+    def offset(self, wearing_chibi):
+        return self.chibi if wearing_chibi else self.normal
+
+    def rise(self, wearing_chibi):
+        return self.offset(wearing_chibi) - self.recorded
+
+
+def body_origin_profile(raw_body, *, seed_chibi, fallback=DEFAULT_ORIGIN, scale=CHIBI_SCALE):
+    """Calibrate from the unmodified capture, never a re-dressed or animated frame."""
+    if not math.isfinite(scale) or not CHIBI_SCALE_MIN <= scale <= 1.0:
+        raise ValueError("chibi_scale_out_of_range")
+    measured = body_origin_offset(raw_body)
+    if measured is None:
+        normal, chibi = fallback, fallback * scale
+    elif seed_chibi:
+        # Do not classify by height: short normal bodies overlap this range.
+        chibi, normal = measured, min(ORIGIN_MAX, measured / scale)
+    else:
+        normal, chibi = measured, measured * scale
+    return BodyOriginProfile(chibi if seed_chibi else normal, normal, chibi)
 
 
 def body_origin_offset(body):

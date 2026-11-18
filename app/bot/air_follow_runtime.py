@@ -11,6 +11,8 @@ import prop_motion_guard
 OBSERVE_INTERVAL=.1
 OBSERVATION_TTL=1.5
 LOG_INTERVAL=5.
+MAX_LANDING_HOVER_SECONDS=6.
+BLOCKED_LANDING_RETRY_SECONDS=2.
 
 
 def _now(c):
@@ -46,6 +48,9 @@ def _bind_motion(motion,metadata,now):
     motion._runtime_level_change=metadata.get('level_change')
     motion._runtime_retire_reason=None;motion._runtime_land_logged=False
     motion._runtime_lock=threading.RLock()
+    motion._runtime_frame_diag=dict(last_at=now,callback_gap=0.,motion_busy=0,
+        geometry_busy=0,scene_unavailable=0,publication_busy=0)
+    motion._runtime_landing_blocked=False
     return motion
 
 
@@ -100,13 +105,16 @@ def _snapshot(c,now):
 
 
 @contextmanager
-def _hot_scene(c):
+def _hot_scene(c,*,diagnostics=None):
     backend=prop_motion_guard.backend(getattr(c,'_terrain_adapter',None))
     lock=getattr(backend,'_lock',None)
     acquired=lock is None or lock.acquire(blocking=False)
     try:
-        if not acquired:yield None,None;return
+        if not acquired:
+            if diagnostics is not None:diagnostics['geometry_busy']+=1
+            yield None,None;return
         terrain=c._air_terrain()
+        if terrain is None and diagnostics is not None:diagnostics['scene_unavailable']+=1
         def covered(points):
             if backend is None:return True
             # backend uses the same reentrant lock already acquired without waiting.
@@ -167,20 +175,34 @@ def maybe_start(c,terrain,who,now):
     if math.dist(current['position'],snapshot['position'])>2.:return False
     with _hot_scene(c) as (fresh,_covered):
         if fresh is not terrain:return False
-    stop=_stop_state(c)
-    with stop[0]:
+    rejected=False
+    def takeoff_is_current():
+        # Called under the publication lock, after the controller's solo/air locks.
+        # Never wait on the geometry lock here: hot motion takes it before stop[0].
+        nonlocal rejected
+        rejected=True
         if (getattr(c,'_air_motion',None) is not None or getattr(c,'motion',None) is not owner
                 or _owner_stamp(c)!=stamp or tuple(c.position)!=position
                 or not _enabled_cached(c) or c._air_block_reason(committed_at) is not None
-                or current['level_change']!=snapshot['level_change']
-                or selection!=prop_motion_guard.selection(getattr(c,'_terrain_adapter',None))):
-            _log(c,'air_follow_deferred',committed_at,'takeoff_snapshot_changed');return False
-        if not c._air_start(plan,committed_at):return False
-    air=c._air_motion
-    if not isinstance(air,AirFollowMotion):return False
-    air._runtime_binding=snapshot['binding'];air._runtime_target=snapshot['target']
-    air._runtime_started=now;air._runtime_level_change=snapshot['level_change']
-    air._runtime_retire_reason=None;air._runtime_land_logged=False
+                or current['level_change']!=snapshot['level_change']):
+            return False
+        adapter=getattr(c,'_terrain_adapter',None)
+        if getattr(adapter,'_detached_for_follow_rebind',False):return False
+        geometry_lock=getattr(prop_motion_guard.backend(adapter),'_lock',None)
+        if geometry_lock is not None and not geometry_lock.acquire(blocking=False):
+            return False
+        try:
+            rejected=selection!=prop_motion_guard.selection(adapter)
+            return not rejected
+        finally:
+            if geometry_lock is not None:geometry_lock.release()
+    if not c._air_start(plan,committed_at,_commit_guard=takeoff_is_current):
+        if rejected:
+            _log(c,'air_follow_deferred',committed_at,'takeoff_snapshot_changed')
+        return False
+    if not isinstance(c._air_motion,AirFollowMotion):return False
+    # _new_motion binds runtime fields before publication. Do not reset fields
+    # that an Actor frame may already have updated after publication.
     c.log('air_follow_start',reason=observation.get('reason'),at=list(c.position),
           target=list(snapshot['position']),gap=3.,speed_limit=air_follow.DEFAULT_POLICY.max_horizontal)
     return True
@@ -272,6 +294,19 @@ def _promote_frame(c,air,body,now):
         finally:stop[0].release()
 
 
+def _landing_unavailable(c,air,now,reason,stage):
+    # The deadline is for active search/hover. Never synthesize ground contact
+    # when there is no verified route. Degraded retries can see a later scene.
+    since=air._landing_wait_since
+    if since is not None and now-since>=MAX_LANDING_HOVER_SECONDS:
+        if not air._runtime_landing_blocked:
+            air._runtime_landing_blocked=True
+            c.log('air_follow_landing_blocked',reason='no_verified_route',cause=reason,
+                  hover_seconds=round(now-since,3),stage=stage,at=list(air.pos(now)))
+    else:
+        _log(c,'air_follow_deferred',now,'no_safe_landing',cause=reason,stage=stage)
+
+
 def tick(c,now):
     air=getattr(c,'_air_motion',None)
     if not isinstance(air,AirFollowMotion):return _queue_promotion(c,air,now)
@@ -279,56 +314,89 @@ def tick(c,now):
     if not _same_scene(c,air):
         _release_old_scene(c,air,now);return False
     if air.arrived(now):return True
-    if now-getattr(air,'_runtime_cold_at',-math.inf)<.15:return True
+    minimum=BLOCKED_LANDING_RETRY_SECONDS if air._runtime_landing_blocked else .15
+    if now-getattr(air,'_runtime_cold_at',-math.inf)<minimum:return True
     air._runtime_cold_at=now
     snapshot,why=_snapshot(c,now)
     retire=_retire_reason(c,air,now,snapshot,why) or getattr(air,'_runtime_retire_reason',None)
     if retire:air._runtime_retire_reason=retire
+    # Start the deadline even if cold focus/geometry is temporarily unavailable.
+    with air._runtime_lock:
+        if retire:air.cancel(now,reason=retire)
+        if air._landing_wait_since is None:air._runtime_landing_blocked=False
+        pending=air._land_requested or air._frame_error
     goal=snapshot['position'] if snapshot and not retire else c.position
-    if not prop_motion_guard.focus(getattr(c,'_terrain_adapter',None),c.position,goal):
+    adapter=getattr(c,'_terrain_adapter',None)
+    if not prop_motion_guard.focus(adapter,c.position,goal):
+        if pending:
+            with air._runtime_lock:_landing_unavailable(c,air,now,pending,'props_focus')
         _log(c,'air_follow_deferred',now,'props_focus_unavailable');return True
     terrain=c._air_terrain()
     if terrain is None:
+        if pending:
+            with air._runtime_lock:_landing_unavailable(c,air,now,pending,'geometry')
         _log(c,'air_follow_deferred',now,'geometry_unavailable');return True
     observation=_observe(c,now,terrain,snapshot) if snapshot and not retire else None
-    reason=retire or ('target_grounded' if observation and observation.get('mode')=='grounded' else None)
-    reason=reason or getattr(air,'_land_requested',None)
+    external=retire or ('target_grounded' if observation and observation.get('mode')=='grounded' else None)
     with air._runtime_lock:
         air.refresh(terrain,observation,now)
-        if reason:air.cancel(now,terrain,reason)
+        if external:air.cancel(now,reason=external)
+        reason=air._land_requested or air._frame_error
         position=tuple(air.pos(now));velocity=tuple(air.current_velocity)
-        can_land=bool(reason and air.follow_mode!='landing' and math.dist(velocity,(0.,0.,0.))<=.05)
+        can_land=bool(reason and air.follow_mode!='landing' and math.dist(velocity,(0.,0.,0.))<=1e-5)
     if can_land:
-        # Slow geometry work is outside the motion lock. Hot frames continue braking/hovering.
-        selection=prop_motion_guard.selection(getattr(c,'_terrain_adapter',None))
-        plan=air_follow.landing_plan(terrain,position,velocity,observation if not retire else None)
-        covered=plan is not None and prop_motion_guard.covers(getattr(c,'_terrain_adapter',None),plan)
+        # Slow geometry work is outside motion/publication locks.
+        selection=prop_motion_guard.selection(adapter)
+        landing_observation=observation if not retire else None
+        plan=air_follow.landing_plan(terrain,position,velocity,landing_observation)
+        covered=plan is not None and prop_motion_guard.covers(adapter,plan)
+        stage='primary_no_route' if plan is None else 'primary_not_covered'
+        if not covered:
+            fallback_observation=landing_observation
+            if fallback_observation is None and snapshot is not None and not retire:
+                fallback_observation=dict(position=snapshot['position'])
+            plan=air_follow.fallback_landing_plan(terrain,position,velocity,fallback_observation,
+                origin=air._recovery_origin,plan_check=lambda p:prop_motion_guard.covers(adapter,p))
+            covered=plan is not None
         # Planning may outlive a room/target/geometry update. Never publish the stale plan.
         committed_at=_now(c)
         latest,latest_reason=_snapshot(c,committed_at)
         latest_retire=_retire_reason(c,air,committed_at,latest,latest_reason)
         latest_retire=latest_retire or getattr(air,'_runtime_retire_reason',None)
+        target_relative=bool(landing_observation and landing_observation.get('mode')=='grounded'
+                             and plan is not None and plan.get('reason')!='air_follow_fallback_land')
         target_current=bool(retire or (latest is not None and snapshot is not None
             and latest['binding']==snapshot['binding'] and latest['target']==snapshot['target']
             and latest['level_change']==snapshot['level_change']
-            and math.dist(latest['position'],snapshot['position'])<=.5))
+            and (not target_relative or math.dist(latest['position'],snapshot['position'])<=.5)))
         with _hot_scene(c) as (current_terrain,_covered):
-            # Keep the nonblocking-acquired geometry lock through the scalar publication.
+            # Preserve the existing geometry -> motion -> try-publication order.
             with air._runtime_lock:
                 stop=_stop_state(c);locked=stop[0].acquire(blocking=False)
                 try:
                     if (locked and covered and c.motion is air and c._air_motion is air
                             and _same_scene(c,air) and target_current and current_terrain is terrain and latest_retire==retire
+                            and getattr(c,'_terrain_adapter',None) is adapter
+                            and (air._land_requested or air._frame_error)==reason
                             and math.dist(position,air.pos(now))<1e-7
                             and math.dist(velocity,air.current_velocity)<1e-7
-                            and selection==prop_motion_guard.selection(getattr(c,'_terrain_adapter',None))):
-                        if not air.install_landing(plan,committed_at,reason):
+                            and selection==prop_motion_guard.selection(adapter)):
+                        if air.install_landing(plan,max(committed_at,air._last_now),reason):
+                            air._runtime_landing_blocked=False
+                            if plan.get('reason')=='air_follow_fallback_land':
+                                c.log('air_follow_landing_fallback',reason=reason,at=list(position),
+                                      landing=list(plan['landing']))
+                        else:
                             _log(c,'air_follow_deferred',now,'landing_commit_rejected',cause=reason)
-                    elif not covered:_log(c,'air_follow_deferred',now,'no_safe_landing',cause=reason)
-                    else:_log(c,'air_follow_deferred',now,'landing_snapshot_changed',cause=reason)
+                            _landing_unavailable(c,air,now,reason,'install')
+                    elif c.motion is air and c._air_motion is air:
+                        if covered:_log(c,'air_follow_deferred',now,'landing_snapshot_changed',cause=reason)
+                        if (air._land_requested or air._frame_error)==reason:
+                            _landing_unavailable(c,air,now,reason,'snapshot_changed' if covered else stage)
                 finally:
                     if locked:stop[0].release()
-    _log(c,'air_follow_update',now,air.follow_mode,at=list(c.position),
+    mode='landing_blocked' if air._runtime_landing_blocked else air.follow_mode
+    _log(c,'air_follow_update',now,mode,at=list(c.position),
          target=None if snapshot is None else list(snapshot['position']),
          retire=retire,lease=getattr(air,'lease_count',0))
     return True
@@ -339,14 +407,22 @@ def frame(c,air,body,now):
     if c.motion is not air or c._air_motion is not air:return None
     lock=getattr(air,'_runtime_lock',None)
     if lock is None:return None
+    diag=air._runtime_frame_diag
+    diag['callback_gap']=max(diag['callback_gap'],now-diag['last_at'])
+    diag['last_at']=now
     if not lock.acquire(blocking=False):
-        # Cold critical sections only publish scalar state; never wait on them in the packet thread.
+        diag['motion_busy']+=1
         return body,c.position,c.heading
-    try:return _frame_locked(c,air,body,now)
+    events=[]
+    try:result=_frame_locked(c,air,body,now,events)
     finally:lock.release()
+    # The real log sink writes to disk. Keep these diagnostics out of all
+    # motion/geometry/publication critical sections.
+    for event,reason,fields in events:_log(c,event,now,reason,**fields)
+    return result
 
 
-def _frame_locked(c,air,body,now):
+def _frame_locked(c,air,body,now,events):
     if not _same_scene(c,air):
         _release_old_scene(c,air,now)
         return body,c.position,c.heading
@@ -354,25 +430,45 @@ def _frame_locked(c,air,body,now):
     snapshot,why=_snapshot(c,now)
     retire=_retire_reason(c,air,now,snapshot,why)
     if retire:air._runtime_retire_reason=retire
-    with _hot_scene(c) as (terrain,covered):
+    diag=air._runtime_frame_diag
+    with _hot_scene(c,diagnostics=diag) as (terrain,covered):
         if terrain is None:
-            _log(c,'air_follow_deferred',now,'hot_geometry_busy')
+            events.append(('air_follow_deferred','hot_geometry_busy',{}))
             return body,c.position,c.heading
         observation=_state(c).get('observation')
         if retire or getattr(air,'_runtime_retire_reason',None):
             observation=dict(mode='unknown',reason='retiring',position=c.position,
                              velocity=(0.,0.,0.),observed_at=now,heading=0.)
-        result=air.advance(now,terrain=terrain,observation=observation,path_check=covered)
-        if not result.get('ok'):
-            air._runtime_retire_reason=result.get('reason','frame_blocked')
-            _log(c,'air_follow_deferred',now,result.get('reason','frame_blocked'))
         stop=_stop_state(c)
-        if not stop[0].acquire(blocking=False):return source_body,c.position,c.heading
+        locked=False
+        def current():
+            return (c.motion is air and c._air_motion is air and _same_scene(c,air)
+                    and stamp==_owner_stamp(c))
+        def commit_guard():
+            nonlocal locked
+            locked=stop[0].acquire(blocking=False)
+            if not locked:
+                diag['publication_busy']+=1
+                return False
+            return current()
         try:
-            def current():
-                return (c.motion is air and c._air_motion is air and _same_scene(c,air)
-                        and stamp==_owner_stamp(c))
-            if not current():return source_body,c.position,c.heading
+            # Validate while holding geometry and motion, but not publication.
+            # The short B try-lock then protects both the commit and the Actor.
+            result=air.advance(now,terrain=terrain,observation=observation,path_check=covered,
+                               commit_guard=commit_guard)
+            if result.get('committed') is False or not locked and not commit_guard():
+                return source_body,c.position,c.heading
+            if not result.get('ok'):
+                events.append(('air_follow_deferred',result.get('reason','frame_blocked'),{}))
+            elapsed=result.get('clock_gap')
+            if elapsed is not None:
+                events.append(('air_follow_clock_reanchored','air_follow_clock_gap',dict(
+                    elapsed=round(elapsed,4),phase=air.follow_mode,
+                    callback_gap=round(diag['callback_gap'],4),
+                    motion_busy=diag['motion_busy'],geometry_busy=diag['geometry_busy'],
+                    scene_unavailable=diag['scene_unavailable'],publication_busy=diag['publication_busy'])))
+            for key in ('callback_gap','motion_busy','geometry_busy','scene_unavailable','publication_busy'):
+                diag[key]=0
             if air.arrived(now):
                 if not getattr(air,'_runtime_land_logged',False):
                     air._runtime_land_logged=True
@@ -386,7 +482,8 @@ def _frame_locked(c,air,body,now):
             c.position=position
             if heading is not None:c.heading=heading
             return body,position,heading
-        finally:stop[0].release()
+        finally:
+            if locked:stop[0].release()
 
 
 def maintenance(c,now):
@@ -394,5 +491,6 @@ def maintenance(c,now):
     air=getattr(c,'_air_motion',None)
     if isinstance(air,AirFollowMotion) and c.motion is air:
         snapshot,why=_snapshot(c,now)
-        if _retire_reason(c,air,now,snapshot,why) or getattr(air,'_land_requested',None):
+        if (_retire_reason(c,air,now,snapshot,why) or getattr(air,'_land_requested',None)
+                or air._frame_error):
             tick(c,now)

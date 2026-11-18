@@ -69,7 +69,8 @@ def controller(scene=None, now=10.):
     c.logs=[]
     c.log=lambda event,**fields:c.logs.append((event,fields))
     c._air_block_reason=lambda stamp:RP.PoseController._air_block_reason(c,stamp)
-    def start(plan,stamp):
+    def start(plan,stamp,_commit_guard=None):
+        if _commit_guard is not None and not _commit_guard():return False   # tf17：起飞提交前复核（死锁修复）
         c.motion=c._air_motion=RT._new_motion(plan,stamp,clips=NS(pick=lambda key:None),terrain=scene)
         return True
     c._air_start=start
@@ -314,12 +315,14 @@ class ContinuousMotionTests(unittest.TestCase):
         plan['start']=(99.,3.,0.)
         self.assertFalse(m.install_landing(plan,.05))
 
-    def test_clock_gap_holds_last_committed_position(self):
+    def test_clock_gap_resumes_from_last_committed_position(self):
+        # tf17（11-18 线上悬空）：断档不再锁存悬停，从上一已发位置按 ≤0.10 s 重新锚定续飞。
+        import math
         m=motion(self.scene);position=m.pos(.05)
         result=m.advance(1.)
-        self.assertFalse(result['ok'])
-        self.assertEqual(result['reason'],'air_follow_clock_gap')
-        self.assertEqual(m.pos(1.),position)
+        self.assertTrue(result['ok'])
+        self.assertLessEqual(math.dist(m.pos(1.),position),6.5*.10+1e-6)
+        self.assertTrue(m.advance(1.05)['ok'])
 
     def test_missing_path_coverage_holds(self):
         m=motion(self.scene);position=m.pos(.05)

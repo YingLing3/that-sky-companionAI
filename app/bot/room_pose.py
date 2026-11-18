@@ -8,10 +8,12 @@
   当前状态写到 <控制文件>.state.json。play() 也供接受好友请求时调用（播接烛动作）。
 """
 import copy
+from functools import wraps
 import json
 import math
 import random
 import struct
+import tempfile
 import threading
 import time
 import uuid as uuidlib
@@ -68,6 +70,14 @@ WALK_MAX_CLIMB = 2.0               # 自己逛：目的地比现在高这么多�
 SOCIAL_MAX_SECONDS = 120.0         # 牵手/背背最长保持（对方按结束小光看不到时的兜底）
 SOCIAL_LOST_DISTANCE = 25.0        # 牵手时带路方离开这么远（传送/飞走）就松手（牵手已改成每帧贴身，正常跑不会拉开）
 HOLD_DISTANCE = 0.5                # 牵手跟在带路方身边的距离
+# 2026-11-18 牵手腿歪：真机被牵方（gamemsg-1031-0358 04:01:40~50）整段牵手 0x21dd40c=0（“自己在走”标记）、
+# 姿态块码 0/0/0、code90=0，只用 0x21ddcc8 走路权重（走 31 / 停 0）。小光以前走 WALK_FORCE（0x21dd40c=1、
+# 站着 7/7/7），带路方客户端会把这一帧当成小光自己走，画到小光上报的坐标，下一帧又挂回手上 → 腿歪一下。
+# 关掉：CLAUDEWORK_HOLD_FOLLOWER_FLAGS=0。
+import os as _os
+HOLD_FOLLOWER_FLAGS = _os.environ.get("CLAUDEWORK_HOLD_FOLLOWER_FLAGS", "1") != "0"
+HOLD_MOVE_FORCE = {"0x21dd40c": 0, "0x21ddcc8": 31, "0x1715ed0": 0, "0x1715f48": 0, "0x1715f70": 0}
+HOLD_STILL_FORCE = {"0x21dd40c": 0, "0x21ddcc8": 0, "0x1715ed0": 0, "0x1715f48": 0, "0x1715f70": 0}
 CANDLE_REPLY_RANGE = 6.0           # 这么近的人对小光举蜡烛，小光就举起来回应
 CANDLE_REPLY_COOLDOWN = 30.0       # 同一个人 30 秒内不重复回应
 CANDLE_REPLY_MAX = 20.0            # 回应最多举这么久（对方一直不放下的兜底）
@@ -1001,6 +1011,10 @@ def _solo_action(function):
                 return self._air_ground_start(function, args, kwargs)
             return function(self, *args, **kwargs)
 
+        # Validate the continuous takeoff before it can enqueue a solo action.
+        if function.__name__ == "_air_start" and kwargs.get("_commit_guard") is not None:
+            return invoke()
+
         # 已有社交连锁的锁顺序/结束分支完全由旧方法负责。
         if self.social is not None or self._active_running():
             return invoke()
@@ -1103,6 +1117,16 @@ def _home_seat_action(function):
     return guarded
 
 
+def _appearance_write(method):
+    """Serialize outfit commits with the delayed voice-counter update."""
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        guard = self.__dict__.setdefault("_appearance_lock", threading.RLock())
+        with guard:
+            return method(self, *args, **kwargs)
+    return locked
+
+
 class PoseController(SeatTiltControllerMixin, threading.Thread):
     def __init__(self, control_path, seed, tracker, log, stop, account=None):
         super().__init__(daemon=True, name="pose-control")
@@ -1117,6 +1141,8 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
         seed = with_appearance(social_pose.stand(seed))     # 归成站立；站姿/装扮按 control/attitude + control/outfit.json
         self.path, self.seed, self.tracker, self.log, self.stop = Path(control_path), seed, tracker, log, stop
         self.seed_heading = anim_pose.yaw_heading(anim_pose.read(seed)["yaw1"])   # 种子录制时的朝向
+        self._origin_scale = social_pose.configured_chibi_scale()
+        self._remember_chibi(seed)
         self.base = seed                   # 姿态底板（待机或举烛），动画字段由 post 按时间表覆盖
         self.last_mtime = None
         self.state = {"pose": "idle"}
@@ -1280,9 +1306,21 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
 
     def _air_ground_start(self, function, args, kwargs):
         """AirMotion 接管事务：与 ready 地面提交互斥，不属于单人收尾屏障。"""
+        # Takeover order: solo -> air_ground -> terrain_stop (publication only).
+        # B must never enclose a decorated action or an adapter invalidate/cancel.
         with self.__dict__.setdefault("_solo_lock", threading.RLock()), self.__dict__.setdefault("_air_ground_lock", threading.RLock()):
+            guard = kwargs.get("_commit_guard")
+            if guard is not None:
+                with self._terrain_stop_state()[0]:
+                    if not guard():
+                        return False
+                # An existing solo Exit still defers the original plan, not a
+                # callback validating the state of the earlier follow tick.
+                deferred_kwargs = {k: v for k, v in kwargs.items() if k != "_commit_guard"}
+            else:
+                deferred_kwargs = kwargs
             # 复核快速入口与取锁之间新建的单人事件；完整 Exit 后再起跳。
-            if self._solo_defer(function, args, kwargs):
+            if self._solo_defer(function, args, deferred_kwargs):
                 return True
             result = function(self, *args, **kwargs)
             air = getattr(self, "_air_motion", None)
@@ -1899,6 +1937,7 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
         self.log("explore", toward=bool(toward), waypoints=len(pts),
                  goal=[round(v, 2) for v in pts[-1]])
 
+    @_appearance_write
     def _set_attitude(self, value):
         """在线换站姿：改种子和当前底板里装扮块的站姿值，马上开始发。"""
         if not 0 <= value <= 14:
@@ -1918,6 +1957,7 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
                  holding=bool(self.holding), social=self.social is not None, walking=self.motion is not None,
                  override=("seed" in map_long_engine.POSE_OVERRIDE))   # 诊断：实际在发的那份 Actor
 
+    @_appearance_write
     def _set_voice(self, value):
         """在线换叫声（T23-7）：仿 _set_attitude 改种子/底板装扮块的 voice token（bits4）。
 
@@ -1968,6 +2008,7 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
                  override=("seed" in map_long_engine.POSE_OVERRIDE))
         return changed
 
+    @_appearance_write
     def _voice_counter_commit(self, gen):
         """voice 帧发出 0.45 s 后补一次外观计数 +1（真人节奏；gen 变了说明期间换图/又换声，作废）。"""
         try:
@@ -1990,40 +2031,71 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
         except Exception as exc:                            # 计数器失败不能拖垮姿态线程
             self.log("voice_counter_error", error=str(exc)[:160])
 
+    @_appearance_write
     def _set_outfit(self, outfit, changes=None):
-        """在线换装（T23-3）：整套装扮对象写进 control/outfit.json，改种子/底板的部位 id，
-        外观指纹变了计数 +1（别人客户端才会重新读）。changes 给了就只改这些部位（脱掉写 0）；
-        legs/arms 在 Actor 块里没有，只服务器改。"""
         if not isinstance(outfit, dict) or not outfit:
             return
         only = None
         if isinstance(changes, list) and changes:
             only = {c.get("slot") for c in changes if isinstance(c, dict) and c.get("slot")}
+
+        override = map_long_engine.POSE_OVERRIDE.get("seed")
+        old_seed, old_base = self.seed, self.base
+        previous_mask = _chibi_mask(old_seed)
+        part = outfit.get("mask")
+        fid = part.get("id") if isinstance(part, dict) else part
+        if (type(fid) is int and 0 <= fid <= 0xFFFFFFFF
+                and previous_mask is not None and (fid in social_pose.CHIBI_MASK_IDS) != previous_mask):
+            # Verified full snapshots carry the mask even if a previous
+            # pose.json change was coalesced with a different outfit slot.
+            if only is not None:
+                only.add("mask")
+            elif fid == 0:
+                only = {"mask"} | {k for k, v in outfit.items()
+                                   if (v.get("id") if isinstance(v, dict) else v)}
+        new_seed = _patch_outfit_ids(old_seed, outfit, only)
+        new_mask = _chibi_mask(new_seed)
+        switched_chibi = new_mask != previous_mask and None not in (new_mask, previous_mask)
+        pending = getattr(self, "_pending_chibi_outfit", None)
+        if (switched_chibi or pending) and self._hop_running():
+            # Fixed-step Hop pins the Actor seed identity (including outfit).
+            # Commit at release, never invalidate an in-air proof for clothing.
+            if pending and isinstance(changes, list) and isinstance(pending[1], list):
+                changes = pending[1] + changes
+            self._pending_chibi_outfit = (outfit, changes)
+            return
+        self._pending_chibi_outfit = None
+        busy = bool(self.holding or self.social)
+        new_base = new_seed if old_base == old_seed else _patch_outfit_ids(old_base, outfit, only)
+        new_override = (_patch_outfit_ids(override, outfit, only) if busy and override else new_base)
+        if switched_chibi and (any(_chibi_mask(body) != new_mask for body in (new_base, new_override))
+                               or any(outfit_counter_of(body) is None
+                                      for body in (new_seed, new_base, new_override))):
+            self.log("outfit_skipped", reason="chibi_wire_shape")
+            return
+        new_seed = set_outfit_counter(new_seed)
+        n = outfit_counter_of(new_seed)
+        if n is not None:
+            new_base = new_seed if old_base == old_seed else _patch_counter(new_base, n)
+            new_override = _patch_counter(new_override, n) if busy and override else new_base
         try:
             CONTROL_DIR.mkdir(parents=True, exist_ok=True)
-            (CONTROL_DIR / "outfit.json").write_text(json.dumps(outfit, ensure_ascii=False), encoding="utf-8")
-            if only:
-                p = CONTROL_DIR / "outfit_slots.json"
-                try:
-                    prev = json.loads(p.read_text())
-                    prev = prev if isinstance(prev, list) else []
-                except (OSError, ValueError):
-                    prev = []
-                p.write_text(json.dumps(sorted(set(prev) | set(only))), encoding="utf-8")
-        except OSError:
-            pass
-        old_seed = self.seed
-        self.seed = with_outfit(old_seed, outfit, only)
-        if self.base is old_seed or self.base == old_seed:
-            self.base = self.seed
-        else:
-            self.base = with_outfit(self.base, outfit, only)
-        self._set_override(map_long_engine.POSE_OVERRIDE.get("seed") if self.holding or self.social else self.base)
-        if not (self.holding or self.social):
-            self._set_override(self.base)
+            slots = set(only or ())
+            if switched_chibi:
+                slots.add("mask")
+            if slots:
+                prev = _read_control_json("outfit_slots.json")
+                _write_appearance_json(CONTROL_DIR / "outfit_slots.json",
+                                       sorted(slots | {v for v in (prev if isinstance(prev, list) else [])
+                                                       if isinstance(v, str)}))
+            _write_appearance_json(CONTROL_DIR / "outfit.json", outfit)
+        except OSError as exc:
+            self.log("outfit_persist_error", error=str(exc)[:160])
+        self._remember_chibi(new_seed)
+        self.seed, self.base = new_seed, new_base
+        self._set_override(new_override)  # One publish: mask and counter travel together.
         sent = map_long_engine.POSE_OVERRIDE.get("seed") or self.raw_seed
-        ids = outfit_ids_of(sent) or {}
-        self.log("outfit_set", sent_ids={k: v for k, v in ids.items()}, sent_counter=outfit_counter_of(sent),
+        self.log("outfit_set", sent_ids=outfit_ids_of(sent) or {}, sent_counter=outfit_counter_of(sent),
                  fingerprint=outfit_fingerprint(sent), holding=bool(self.holding), social=self.social is not None,
                  walking=self.motion is not None, override=("seed" in map_long_engine.POSE_OVERRIDE))
 
@@ -2097,7 +2169,7 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
         """
         if not self._named_landing():
             return False
-        origin = tuple(self.home)
+        origin = self._chibi_wire_position(tuple(self.home))
         epoch = LAST_EPOCH
         own = None
         if epoch is not None:
@@ -2177,6 +2249,7 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
             self.raw_seed = snapshot["raw_seed"]
             self.seed = snapshot["seed"]
             self.base = snapshot["base"]
+            self._remember_chibi(self.seed)
             self.home = tuple(snapshot["home"])
             self.position = tuple(snapshot["position"])
             self.heading = snapshot.get("heading")
@@ -2302,10 +2375,13 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
             x, y, z = anim_pose.read_origin(seed)
             # 2026-11-07 T20：目标落点自己的高度是种子 wire y；旧位置的 own/leader
             # 高度绝不能当兜底（日志 12:42:24 曾把 136.087 带到千鸟城）。
+            basis_delta = self._body_origin_profile(seed).recorded - self._body_origin_profile().recorded
             candidates = terrain_spawn.reference_candidates(
-                placement_ref=ground_ref, spawn_y=y, order=('placement', 'spawn'))
+                placement_ref=ground_ref, spawn_y=y - basis_delta, order=('placement', 'spawn'))
             new_y, _used, _source = terrain_spawn.choose_height(
                 self.terrain_ground, x, z, candidates, allow_player_fallback=False)
+            if new_y is not None:
+                new_y += basis_delta
             if new_y is None and math.isfinite(y):
                 new_y = y                       # 地形没 ready：用目标 placement 的 wire y
             if new_y is not None and math.isfinite(new_y):
@@ -2327,7 +2403,7 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
                     heading = self.heading if self.heading is not None else self.seed_heading
                     h = math.radians(heading or 0.0)
                     social_accept.send_teleport(LAST_EPOCH, own,
-                                                (self.position[0], rpc_y, self.position[2]),
+                                                self._chibi_wire_position((self.position[0], rpc_y, self.position[2])),
                                                 (math.sin(h), 0.0, math.cos(h)))
             except Exception as exc:
                 self.log("relocate_teleport_failed", error=str(exc)[:120])
@@ -2388,18 +2464,81 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
                 body = anim_pose.write_pose_fields(body, anim_pose.rotate_pose(clip.at(now), h - clip.heading))
                 posed = True
             body = anim_pose.write_velocity(body, v)
-            body = social_pose.force(body, social_pose.WALK_FORCE)
+            body = social_pose.force(body, HOLD_MOVE_FORCE if HOLD_FOLLOWER_FLAGS else social_pose.WALK_FORCE)
+        elif HOLD_FOLLOWER_FLAGS:
+            body = social_pose.force(body, HOLD_STILL_FORCE)
+        if HOLD_FOLLOWER_FLAGS:
+            body = anim_pose.write(body, code90=0)
         return pos, h, body, posed
+
+    def _remember_chibi(self, seed):
+        if not getattr(self, "_chibi_seen", False):
+            self._chibi_seen = (_chibi_mask(self.raw_seed) is True or _chibi_mask(seed) is True)
+
+    def _body_origin_profile(self, raw_seed=None, *, fallback=None):
+        raw_seed = getattr(self, "raw_seed", None) if raw_seed is None else raw_seed
+        if fallback is None:
+            fallback = getattr(self, "_origin_fallback", social_pose.DEFAULT_ORIGIN)
+        scale = getattr(self, "_origin_scale", social_pose.CHIBI_SCALE)
+        cached = getattr(self, "_origin_profile_cache", None)
+        if cached is not None and cached[0] is raw_seed and cached[1:3] == (fallback, scale):
+            return cached[3]
+        profile = social_pose.body_origin_profile(raw_seed, seed_chibi=_chibi_mask(raw_seed) is True,
+                                                  fallback=fallback, scale=scale)
+        self._origin_profile_cache = (raw_seed, fallback, scale, profile)
+        return profile
+
+    def _chibi_rise(self, appearance):
+        if not getattr(self, "_chibi_seen", False):
+            return 0.0
+        wearing = _chibi_mask(appearance)
+        return self._body_origin_profile().rise(wearing) if wearing is not None else 0.0
+
+    def _chibi_wire_position(self, position):
+        dy = self._chibi_rise(self.seed)
+        return (position[0], position[1] + dy, position[2]) if dy else position
+
+    def _chibi_wire_body(self, body):
+        """Translate once, using the mask in the same bytes as the outfit counter."""
+        try:
+            if not getattr(self, "_chibi_seen", False):
+                return body
+            wearing = _chibi_mask(body)
+            committed = self.seed
+            actual = _chibi_mask(committed)
+            if wearing is not None and actual is not None and wearing != actual:
+                # The engine can read a seed just before the command commits,
+                # and other pose owners may still hold a copy of the old base.
+                # Reconcile the complete outfit and its counter as one write,
+                # not just the mask (the viewer could cache other old slots).
+                refreshed = _copy_appearance(committed, body)
+                if _chibi_mask(refreshed) == actual:
+                    body, wearing = refreshed, actual
+            seat = getattr(self, "_prop_seat_state", None)
+            social = getattr(self, "social", None)
+            if (getattr(self, "sitting", None) is not None
+                    or (seat and not seat.get("rendered_upright"))
+                    or (social and social.get("kind") == "carry")):
+                # Real seated/carried/prop anchors are not standing offsets.
+                return body
+            dy = self._body_origin_profile().rise(wearing) if wearing is not None else 0.0
+            if dy:
+                coords = anim_pose.read(body)
+                body = anim_pose.write(body, oy=coords["oy"] + dy,
+                                       ay=coords["ay"] + dy if "ay" in coords else None)
+        except (KeyError, ValueError, TypeError) as exc:
+            self.log("chibi_wire_error", error=str(exc)[:160])
+        return body
 
     def _safe_post(self, body):
         """引擎每帧调用。姿态出错绝不能拖垮连接（墓土曾因坏帧掉线、重连后又立刻再掉）：
         记日志、清掉姿态状态，这一帧原样发出。"""
         try:
-            return self._post(body)
+            body = self._post(body)
         except Exception as exc:
             self.log("pose_post_error", error=str(exc)[:200])
             self.reset("post_error")
-            return body
+        return self._chibi_wire_body(body)
 
     @_solo_action
     @upright_action
@@ -2461,18 +2600,9 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
         self.position, self.base = self.home, self.seed
         self._terrain_last_position = self.home
         o = map_long_engine.POSE_OVERRIDE
-        o.pop("post", None)
         named = self._named_landing()
-        if named:
-            # 2026-11-07 T22：validated_room / new_room / rejoin 会换一个
-            # engine（它自己的 _actor_seed 是房间主落点，例如神殿）。当前
-            # 还在千鸟城这类命名落点时，绝不能把 override 清掉退回主落点；
-            # 必须强制写回当前落点种子。
-            o["seed"] = self.seed
-        elif self.seed == self.raw_seed:
-            o.pop("seed", None)
-        else:
-            o["seed"] = self.seed              # 站立版种子
+        self._remember_chibi(self.seed)
+        self._set_override(self.seed, force=named)
         self.state = {"pose": "idle"}
         resumed_sit = False
         stood_up = False
@@ -2551,9 +2681,16 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
     def _set_override(self, body, *, force=False):
         o = map_long_engine.POSE_OVERRIDE
         body = self.seed if body is None else body
-        # 2026-11-07 T22：命名落点期间，任何“回到 idle/站立底板”的
-        # _set_override(self.base) 也不能把 override pop 掉；否则一次举烛、
-        # 坐站、动画或协调器 accept 之后，引擎又逐帧发房间主落点（神殿）。
+        idle = (self.event is None and self.motion is None and self.position == self.home
+                and self.heading is None and self.social is None and not self._active_running())
+        # Mount before publishing. Keep the callback after removal so a seed read
+        # just before the commit can still be corrected according to its mask.
+        if not idle:
+            o["post"] = self._safe_post
+        elif getattr(self, "_chibi_seen", False):
+            o["post"] = self._chibi_wire_body
+        else:
+            o.pop("post", None)
         named = self._named_landing()
         if force or (named and body in (self.raw_seed, self.base)):
             o["seed"] = body
@@ -2561,11 +2698,6 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
             o.pop("seed", None)
         else:
             o["seed"] = body
-        if (self.event is None and self.motion is None and self.position == self.home
-                and self.heading is None and self.social is None and not self._active_running()):
-            o.pop("post", None)
-        else:
-            o["post"] = self._safe_post
 
     def attach_terrain(self, adapter, scope_provider=None, *, prepared=False):
         """Explicit offline-candidate injection only; never auto-load/enable anything.
@@ -2600,27 +2732,34 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
             self._terrain_invalidate()
         self._terrain_prepared = prepared
 
+    def _terrain_stop_state(self):
+        stop = self.__dict__.get("_terrain_stop")
+        if stop is None:
+            stop = self.__dict__.setdefault("_terrain_stop", [threading.RLock(), 0, False, None])
+        return stop
+
+    def _terrain_invalidate_locked(self, stop, *, clear_prepared=False):
+        """Controller fields only; caller owns stop[0], never call the adapter here."""
+        stop[1] += 1
+        self._terrain_request_seq = getattr(self, "_terrain_request_seq", 0) + 1
+        owned = getattr(self, "_terrain_motion", None)
+        if owned is not None and self.motion is owned:
+            stop[2], stop[3] = True, None
+            self.motion = None
+            self.route, self.after_arrive = [], None
+        elif stop[3] is not None and self.motion is None:
+            stop[2], stop[3] = True, None
+        self._terrain_scope_key = self._terrain_scope = self._terrain_motion = None
+        if clear_prepared:
+            self._terrain_prepared = False
+
     def _terrain_invalidate(self, *, clear_prepared=False):
         adapter = getattr(self, "_terrain_adapter", None)
         if adapter is None:
             return
-        stop = self.__dict__.get("_terrain_stop")
-        if stop is None:
-            from threading import RLock
-            stop = self.__dict__.setdefault("_terrain_stop", [RLock(), 0, False, None])
+        stop = self._terrain_stop_state()
         with stop[0]:
-            stop[1] += 1
-            self._terrain_request_seq = getattr(self, "_terrain_request_seq", 0) + 1
-            owned = getattr(self, "_terrain_motion", None)
-            if owned is not None and self.motion is owned:
-                stop[2], stop[3] = True, None
-                self.motion = None
-                self.route, self.after_arrive = [], None
-            elif stop[3] is not None and self.motion is None:
-                stop[2], stop[3] = True, None
-            self._terrain_scope_key = self._terrain_scope = self._terrain_motion = None
-            if clear_prepared:
-                self._terrain_prepared = False
+            self._terrain_invalidate_locked(stop, clear_prepared=clear_prepared)
         # Adapter invalidation may acquire other locks: never hold the stop lock.
         adapter.invalidate()
 
@@ -3844,6 +3983,7 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
         while not self.stop.is_set():
             try:
                 self._poll()
+                self._flush_chibi_outfit()
             except Exception as exc:
                 self.log("pose_error", error=str(exc)[:200])
             try:
@@ -4995,7 +5135,7 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
 
     @_solo_action
     @upright_action
-    def _air_start(self, plan, now):
+    def _air_start(self, plan, now, *, _commit_guard=None):
         """Create AirMotion from a planner result and take movement ownership."""
         self._once_before_motion('air')
         if not prop_motion_guard.covers(getattr(self, "_terrain_adapter", None), plan):
@@ -5004,30 +5144,41 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
         # T23-4：AirMotion 和旧 hop 不能同时驱动。这里先 hard-cancel hop 再接管；
         # hop 是旧的“小跳补台阶”实现，AirMotion 是本次跟随的完整轨迹，保留
         # AirMotion 才能保证位置/落地连续，hop 的半步只会在空中抢帧。
-        if self._hop_running():
-            if self._hop_hard_cancel("air_start"):
-                self.log("air_hop_cancelled", reason="air_start")
-        # Invalidate any terrain-owned plan first; the worker must not pull the
-        # Actor back while the air motion is driving.
-        if getattr(self, "_terrain_adapter", None) is not None:
-            self._terrain_invalidate()
+        adapter = getattr(self, "_terrain_adapter", None)
+        if _commit_guard is None:
+            if self._hop_running():
+                if self._hop_hard_cancel("air_start"):
+                    self.log("air_hop_cancelled", reason="air_start")
+            # Preserve the original explicit/auxiliary air takeover path.
+            if adapter is not None:
+                self._terrain_invalidate()
         from air_follow_runtime import motion_type as _air_motion_type
         motion = _air_motion_type(plan, air_motion.AirMotion)(
             plan, now, clips=self._air_clips(), walk_clip=self.walk_clip,
             terrain=self._air_terrain(), log=self.log)
         if plan.get("static_overlap_escape"):
             motion._static_overlap_binding = self._stuck_binding()[:2]
-        stop = self.__dict__.get("_terrain_stop")
-        if stop is None:
-            from threading import RLock
-            stop = self.__dict__.setdefault("_terrain_stop", [RLock(), 0, False, None])
+        stop = self._terrain_stop_state()
         with stop[0]:
+            if _commit_guard is not None:
+                # Fail closed if planning outlived the owner. Hop is checked
+                # under its publication lock, so it cannot win between the
+                # final guard and the AirMotion publication.
+                if not _commit_guard() or adapter is not getattr(self, "_terrain_adapter", None):
+                    return False
+                if adapter is not None:
+                    self._terrain_invalidate_locked(stop)
             self.motion = self._air_motion = motion
             self._terrain_motion = None
             self.route, self.after_arrive = [], None
             stop[1] += 1
             stop[2], stop[3] = False, None
-        self._air_phase = None
+            self._air_phase = None
+        if _commit_guard is not None and adapter is not None:
+            # Runtime request/activation may own its lock before terrain_stop.
+            # The controller already revoked the ground owner above; revoke
+            # the adapter scope without holding terrain_stop.
+            adapter.invalidate()
         self._set_override(self.base)
         self.log("air_start", kind=plan.get("kind"),
                  pos=[round(v, 2) for v in plan.get("start", ())],
@@ -6001,7 +6152,7 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
                 spot = (spot[0], g, spot[2])
             self.position = spot
             if LAST_EPOCH is not None:
-                social_accept.send_teleport(LAST_EPOCH, soc["own"], spot, (fx, 0.0, fz))
+                social_accept.send_teleport(LAST_EPOCH, soc["own"], self._chibi_wire_position(spot), (fx, 0.0, fz))
         if isinstance(self.event, _DanceLoop) and self.event is soc.get("event"):
             if soc.get("exit"):
                 self.event = self.event.inner
@@ -6050,6 +6201,12 @@ class PoseController(SeatTiltControllerMixin, threading.Thread):
             self.log("pose_error", error=str(exc)[:200], step="after_arrive")
             if isinstance(cmd, dict) and cmd.get("pose") == "_sit_now":
                 self._sit_failed("sit_error", seat=cmd.get("seat"), detail=str(exc)[:120])
+
+    @_appearance_write
+    def _flush_chibi_outfit(self):
+        pending = getattr(self, "_pending_chibi_outfit", None)
+        if pending and not self._hop_running():
+            self._set_outfit(*pending)
 
     def _poll(self):
         if not self.path.exists():
@@ -6340,6 +6497,34 @@ def _actor_obs(body):
     return inspect_actor_wire(body, verified_profile_sha256=anim_pose.SHA, check_zero_padding=False)
 
 
+def _copy_appearance(source, target):
+    import synth_capture
+    obs = _actor_obs(source)
+    index = synth_capture._index(obs)
+    outfit, counter = index.get(OUTFIT_GROUP), index.get(OUTFIT_COUNTER)
+    if (not outfit or len(outfit) != OUTFIT_GROUP_TOKENS or not counter
+            or len(counter) != 1 or obs._tokens[counter[0]].extent != 4
+            or outfit_counter_of(target) is None):
+        return target
+
+    def values(ids):
+        tokens = (obs._tokens[i] for i in ids)
+        return [bytes(t.value).hex() if t.kind == "raw" else t.value for t in tokens]
+
+    return social_pose.set_groups(target, {OUTFIT_GROUP: values(outfit), OUTFIT_COUNTER: values(counter)})
+
+
+def _chibi_mask(body):
+    """True/False for a decoded outfit, None when the outfit is unavailable."""
+    if not body:
+        return None
+    try:
+        ids = outfit_ids_of(body)
+        return None if ids is None else ids["mask"] in social_pose.CHIBI_MASK_IDS
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def outfit_ids_of(body):
     """读 Actor 装扮块里 10 个部位的 id（顺序同 OUTFIT_ACTOR_SLOTS）；块形状不对返回 None。"""
     import synth_capture
@@ -6445,6 +6630,19 @@ def _patch_outfit_ids(body, outfit, only_slots=None):
         vals[at] = fid.to_bytes(4, "little").hex()
         changed = True
     return social_pose.set_groups(body, {OUTFIT_GROUP: vals}) if changed else body
+
+
+def _write_appearance_json(path, value):
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False, encoding="utf-8",
+                                         mode="w", prefix="." + path.name + "-") as stream:
+            tmp = Path(stream.name)
+            json.dump(value, stream, ensure_ascii=False)
+        tmp.replace(path)
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
 
 
 def _read_control_json(name):
@@ -6596,7 +6794,7 @@ def set_outfit_counter(body, fingerprint=None):
         n = max(n, here) + 1
         try:
             CONTROL_DIR.mkdir(parents=True, exist_ok=True)
-            f.write_text(json.dumps({"counter": n, "fingerprint": fp}))
+            _write_appearance_json(f, {"counter": n, "fingerprint": fp})
         except OSError:
             pass
     n = max(n, here) & 0xFFFFFFFF

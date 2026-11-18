@@ -171,7 +171,10 @@ class FollowHopCoordinator:
 
     @property
     def active(self):
-        with self.lock:return self._motion is not None
+        # An advisory single-reference read: Actor/solo probes must not
+        # wait on publication. Any use of motion/encoder or owner mutation
+        # still checks under self.lock.
+        return self._motion is not None
 
     def prepare_follow(self,scope,start,goal,*,speed,lease=None,follow_intent=None,permit=None):
         """Single cold job: original ground success is returned unchanged.
@@ -432,21 +435,23 @@ def post_runtime_hop(runtime,body,*,now,original_post,read_origin,animation_code
     if co is not None and co.active and animation_codec is not None:
         try:
             with co.lock:
-                # Inherit only the controller's last actually constructed stamp,
-                # not its origin/POSE. Keep the original raw seed identity pinned
-                # independently so an animation/appearance takeover isn't hidden.
-                e=co._encoder;a=animation_codec
-                inspected=a.inspect_actor_wire(body,verified_profile_sha256=actor_profile.CODEC_SHA256,check_zero_padding=False)
-                raw_id=actor_profile._source_identity(body,inspected,a)
-                if e.seed_identity is None:
-                    co._entry_raw_identity=raw_id
-                    co._entry_bridge_stamp=getattr(runtime.controller,'_hop_last_constructed_stamp',None)
-                    current_heading=getattr(runtime.controller,'heading',None)
-                    if type(current_heading) in (float,int) and math.isfinite(current_heading):
-                        e.heading=float(current_heading)
-                else:need(raw_id==co._entry_raw_identity,'entry_raw_seed_changed')
-                if co._entry_bridge_stamp is not None:
-                    body=a.write(body,**dict(zip(('key','gen','start'),co._entry_bridge_stamp)))
+                # Revalidate the advisory probe under the publication lock.
+                if co.active:
+                    # Inherit only the controller's last actually constructed stamp,
+                    # not its origin/POSE. Keep the original raw seed identity pinned
+                    # independently so an animation/appearance takeover isn't hidden.
+                    e=co._encoder;a=animation_codec
+                    inspected=a.inspect_actor_wire(body,verified_profile_sha256=actor_profile.CODEC_SHA256,check_zero_padding=False)
+                    raw_id=actor_profile._source_identity(body,inspected,a)
+                    if e.seed_identity is None:
+                        co._entry_raw_identity=raw_id
+                        co._entry_bridge_stamp=getattr(runtime.controller,'_hop_last_constructed_stamp',None)
+                        current_heading=getattr(runtime.controller,'heading',None)
+                        if type(current_heading) in (float,int) and math.isfinite(current_heading):
+                            e.heading=float(current_heading)
+                    else:need(raw_id==co._entry_raw_identity,'entry_raw_seed_changed')
+                    if co._entry_bridge_stamp is not None:
+                        body=a.write(body,**dict(zip(('key','gen','start'),co._entry_bridge_stamp)))
         except Exception as exc:co.hard_cancel(str(exc));body=raw_body
     result=publish_runtime_hop(runtime,body,now=now,read_origin=read_origin,animation_codec=animation_codec)
     if co is not None:

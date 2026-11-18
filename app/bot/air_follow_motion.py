@@ -17,6 +17,10 @@ import anim_pose
 
 MAX_STEP = .05
 MAX_ELAPSED = .5
+# A stalled sender is not allowed to spend missing wall time in one Actor frame.
+CLOCK_GAP_RESUME_STEP = .10
+MAX_TIMED_FRAME_STEP = .20
+OBSTACLE_BRAKE_GRACE = .75
 MAX_ACCELERATION = 6.0
 HISTORY_STEPS = 512
 LEASE_SECONDS = 20.0
@@ -99,6 +103,9 @@ class AirFollowMotion(air_motion.AirMotion):
                               velocity=self._current_velocity,reason='takeoff')
         self._preview=[self.a]
         self._frame_error=None
+        self._obstacle_since=None
+        self._recovery_origin=self.a
+        self._landing_wait_since=None
 
     @classmethod
     def from_cruise(cls,existing,now,*,terrain,observation,path_check=None):
@@ -182,7 +189,7 @@ class AirFollowMotion(air_motion.AirMotion):
         # 仅交换RAM快照；完整落点搜索在冷线程、motion锁外执行。
         return True
 
-    def _check_timed_interval(self,now,path_check=None):
+    def _check_timed_interval(self,now,path_check=None,*,verified=None):
         """takeoff/landing也逐帧复核，不能只信起飞时冻结的道具列表。"""
         if self.terrain is None:return 'air_follow_geometry_unavailable'
         import stuck_recovery
@@ -191,18 +198,20 @@ class AirFollowMotion(air_motion.AirMotion):
         while at<end-1e-9:
             at=min(end,at+.01);points.append(self.trajectory.pos(at))
         if callable(path_check) and not path_check(points):return 'air_follow_path_coverage_missing'
+        from skyterrain.capsule import CapsuleProbe
+        probe=CapsuleProbe(self.terrain)
+        if self.follow_mode=='landing' and end>=self.seconds-1e-8 and not probe.standable(self.b):
+            return 'air_follow_landing_support_changed'
         if self.plan.get('prop_overlap_escape'):
             state,reason=stuck_recovery.prop_overlap_frame(self.terrain,self,self._committed,
                 now-self.t0,self._prop_takeoff_state)
-            if reason is None:self._prop_takeoff_state=state
+            if reason is None:verified.append(("_prop_takeoff_state",state))
             return reason
         if self.plan.get('static_overlap_escape'):
             state,reason=stuck_recovery.static_overlap_frame(self.terrain,self,self._committed,
                 now-self.t0,self._static_takeoff_state)
-            if reason is None:self._static_takeoff_state=state
+            if reason is None:verified.append(("_static_takeoff_state",state))
             return reason
-        from skyterrain.capsule import CapsuleProbe
-        probe=CapsuleProbe(self.terrain)
         previous=self._committed;t=begin
         if probe.intersecting(previous):return 'air_follow_initial_contact_changed'
         while t<end-1e-9:
@@ -212,9 +221,15 @@ class AirFollowMotion(air_motion.AirMotion):
         return None
 
     def _hold(self,now,reason):
-        self._frame_error=str(reason);self._land_requested=self._land_requested or str(reason)
+        self._frame_error=str(reason)
+        if self._landing_wait_since is None:self._landing_wait_since=now
         # 突然增加的墙/未知几何不能通过平滑假运动消除；守住最后已发位置并明确上报。
-        self._current_velocity=(0.,0.,0.)
+        self._current_velocity=self.velocity=(0.,0.,0.)
+        if self.follow_mode!='cruise':
+            # The timed path is no longer valid. Keep the last published point;
+            # a new landing plan must prove a route from that point.
+            self._land_requested=self._land_requested or str(reason)
+            self._begin_cruise(now)
         self._last_now=now
         self.last_result=dict(ok=False,phase=self.follow_mode,reason=str(reason),
                               position=self.pos(now),velocity=self.current_velocity,emergency_hold=True)
@@ -231,12 +246,12 @@ class AirFollowMotion(air_motion.AirMotion):
         self.seconds=1.;self.a=self._committed
         self._last_now=now
 
-    def _step(self,now,dt,start,v0,path_check=None):
+    def _step(self,now,dt,start,v0,path_check=None,*,guided=None):
         observation=self.observation
         if self._land_requested:
             observation=dict(observation or {},mode='lost',state='lost',velocity=(0.,0.,0.))
             observation.setdefault('position',start)
-        result=self._guided.step(self.terrain,start,v0,observation,dt=dt,now=now)
+        result=(guided if guided is not None else self._guided).step(self.terrain,start,v0,observation,dt=dt,now=now)
         if not result.get('clear'):return dict(ok=False,reason=result.get('reason','air_follow_step_blocked'))
         p,v,a=map(_point,(result['position'],result['velocity'],result['acceleration']))
         integrated=tuple(start[i]+v0[i]*dt+.5*a[i]*dt*dt for i in range(3))
@@ -269,21 +284,38 @@ class AirFollowMotion(air_motion.AirMotion):
         self.last_result=dict(result,ok=True,phase='cruise',position=p,velocity=v)
         return self.last_result
 
-    def advance(self,now,terrain=None,observation=None,*,path_check=None):
+    def advance(self,now,terrain=None,observation=None,*,path_check=None,commit_guard=None):
+        """Check geometry first; only commit a frame that the caller can publish."""
         now=float(now)
         if not math.isfinite(now):raise ValueError('air_follow_time')
         if terrain is not None:self.terrain=terrain
         if observation is not None:self.observation=observation
-        if now<=self._last_now+1e-9:return dict(self.last_result)
         dt=now-self._last_now
-        if dt>MAX_ELAPSED:return self._hold(now,'air_follow_clock_gap')
-        if self._frame_error:return self._hold(now,self._frame_error)
+        if dt<=1e-9:return dict(self.last_result)
+        gap=dt>MAX_ELAPSED
+        used=min(dt,CLOCK_GAP_RESUME_STEP) if gap else dt
+        if self.follow_mode!='cruise':used=min(used,MAX_TIMED_FRAME_STEP)
+        skipped=dt-used
+
+        def commit(reason=None):
+            if commit_guard is not None and not commit_guard():
+                return dict(self.last_result,committed=False)
+            if reason:
+                self._hold(now,reason)
+                return dict(self.last_result,clock_gap=dt) if gap else dict(self.last_result)
+            return None
+
         if self.follow_mode!='cruise':
-            try:reason=self._check_timed_interval(now,path_check)
+            effective=self._last_now+used
+            verified=[]
+            try:reason=self._check_timed_interval(effective,path_check,verified=verified)
             except (ValueError,TypeError,AttributeError,KeyError,IndexError):reason='air_follow_geometry_error'
-            if reason:return self._hold(now,reason)
+            rejected=commit(reason)
+            if rejected is not None:return rejected
+            for key,state in verified:setattr(self,key,state)
+            local=min(effective-self.t0,self.seconds)
+            self.t0+=skipped
             self._last_now=now
-            local=min(now-self.t0,self.seconds)
             self._committed=tuple(self.trajectory.pos(local))
             self._current_velocity=tuple(self.trajectory.velocity(local))
             self.velocity=self._current_velocity
@@ -293,28 +325,46 @@ class AirFollowMotion(air_motion.AirMotion):
             if self.follow_mode=='takeoff' and local>=self.seconds-1e-8:
                 self._current_velocity=_point(self.plan.get('end_velocity',(0.,0.,0.)))
                 self._begin_cruise(now)
-            return dict(self.last_result)
-        remaining=dt;position=self._committed;velocity=self._current_velocity
-        cursor=self._last_now;pending=[]
-        while remaining>1e-9:
-            step=min(MAX_STEP,remaining);target_time=cursor+step
-            try:result=self._step(target_time,step,position,velocity,path_check)
-            except (ValueError,TypeError,AttributeError,KeyError,IndexError):
-                return self._hold(now,'air_follow_step_error')
-            if not result.get('ok'):return self._hold(now,result.get('reason','air_follow_step_blocked'))
-            pending.append(result);position=result['position'];velocity=result['velocity'];cursor=target_time
-            remaining-=step
-        for result in pending:self._commit_step(result)
+        else:
+            # Guidance changes its cached goal during checks. Stage that state
+            # too, so a denied publication leaves the next frame at the old pose.
+            guided=copy.copy(self._guided)
+            remaining=used;position=self._committed;velocity=self._current_velocity
+            cursor=now-used;pending=[]
+            while remaining>1e-9:
+                step=min(MAX_STEP,remaining);target_time=cursor+step
+                try:result=self._step(target_time,step,position,velocity,path_check,guided=guided)
+                except (ValueError,TypeError,AttributeError,KeyError,IndexError):
+                    return commit('air_follow_step_error')
+                if not result.get('ok'):return commit(result.get('reason','air_follow_step_blocked'))
+                pending.append(result);position=result['position'];velocity=result['velocity'];cursor=target_time
+                remaining-=step
+            rejected=commit()
+            if rejected is not None:return rejected
+            self._guided=guided
+            if pending[-1].get('reason')=='obstacle_brake':
+                if self._obstacle_since is None:self._obstacle_since=now
+                if now-self._obstacle_since>=OBSTACLE_BRAKE_GRACE and math.hypot(*velocity)<=1e-5:
+                    self._frame_error=self._frame_error or 'air_follow_route_blocked'
+                    if self._landing_wait_since is None:self._landing_wait_since=self._obstacle_since
+            else:
+                self._obstacle_since=None
+                self._frame_error=None
+                if not self._land_requested:self._landing_wait_since=None
+            self.t0+=skipped
+            for result in pending:self._commit_step(result)
+            if self._frame_error:
+                self.last_result.update(ok=False,reason=self._frame_error,emergency_hold=True)
         if now-self._lease_at>=LEASE_SECONDS:
             self._lease_at=now;self.lease_count+=1
-        return dict(self.last_result)
+        return dict(self.last_result,clock_gap=dt) if gap else dict(self.last_result)
 
     def request_land(self,reason,now,terrain=None,observation=None):
         """单线程便捷接口；并发运行时用锁外规划+短锁install_landing。"""
         if self._landed or self.follow_mode=='landing':return True
         if terrain is not None:self.terrain=terrain
         if observation is not None:self.observation=observation
-        self._land_requested=str(reason)
+        self.cancel(now,reason=reason)
         if self.terrain is None:return False
         plan=air_follow.landing_plan(self.terrain,self._committed,self._current_velocity,self.observation)
         return self.install_landing(plan,now,reason,require_stopped=False)
@@ -347,8 +397,9 @@ class AirFollowMotion(air_motion.AirMotion):
         self.trajectory=trajectory
         self.a=self._committed;self.b=landing
         self.t0=clock;self.seconds=self.trajectory.duration;self._last_now=clock
-        self.follow_mode='landing';self._frame_error=None;self._static_takeoff_state=None;self._prop_takeoff_state=None
+        self.follow_mode='landing';self._obstacle_since=None;self._frame_error=None;self._static_takeoff_state=None;self._prop_takeoff_state=None
         self._land_requested=str(reason)
+        self._landing_wait_since=None
         self.cancelled=False;self.cancel_reason=str(reason)
         self._preview=[self.a,self.b]
         self.last_result=dict(ok=True,phase='landing',position=self.a,velocity=self.current_velocity,reason=str(reason))
@@ -359,6 +410,8 @@ class AirFollowMotion(air_motion.AirMotion):
         # True表示已受理，绝不表示已降落；冷tick调用request_land完成整段验证。
         if terrain is not None:self.terrain=terrain
         self._land_requested=str(reason)
+        if self.follow_mode!='landing' and self._landing_wait_since is None:
+            self._landing_wait_since=self._last_now if now is None else float(now)
         return True
 
     def render(self,body,now):

@@ -446,3 +446,56 @@ def landing_plan(terrain,position,velocity,observation=None):
                     result['airborne_start']=True;result['start_velocity']=v;return result
     except (ValueError,TypeError,AttributeError):pass
     return None
+
+
+# Cold-only search. Validate support, the whole route and the current prop
+# coverage; a clear ray or an old takeoff position is not a landing proof.
+FALLBACK_RADII = (1., 2., 4., 7., 11., 16., 24.)
+FALLBACK_MAX_ROUTES = 12
+
+
+def fallback_landing_plan(terrain,position,velocity,observation=None,*,origin=None,
+                          plan_check=None):
+    p=_point(position);v=_point(velocity)
+    if p is None or v is None:return None
+    target=_point((observation or {}).get('position'))
+    home=_point(origin)
+    try:
+        brake,stopped=_brake_phases(p,v)
+        probe=CapsuleProbe(terrain)
+        anchors=[q for q in (target,home) if q is not None]
+        dx,dz=(target[0]-stopped[0],target[2]-stopped[2]) if target else (0.,1.)
+        heading=math.atan2(dz,dx)
+        for radius in FALLBACK_RADII:
+            for offset in (0.,.25,-.25,.5,-.5,.75,-.75,1.):
+                angle=heading+offset*math.pi
+                anchors.append((stopped[0]+radius*math.cos(angle),stopped[1],
+                                stopped[2]+radius*math.sin(angle)))
+        candidates=[]
+        for anchor in anchors:
+            if math.hypot(anchor[0]-stopped[0],anchor[2]-stopped[2])>24.:continue
+            base=support_below(terrain,(anchor[0],min(anchor[1],stopped[1]),anchor[2]))
+            if base is None or base>stopped[1]+.05:continue
+            q=(anchor[0],base,anchor[2])
+            if (q not in candidates and math.dist(stopped,q)<=DEFAULT_POLICY.max_landing_distance
+                    and probe.standable(q)):
+                candidates.append(q)
+        # Try verified owner/origin columns first; then prefer the nearest
+        # standable detour instead of committing to an unverified vertical drop.
+        preferred={(q[0],q[2]) for q in (target,home) if q is not None}
+        candidates.sort(key=lambda q:((q[0],q[2]) not in preferred,math.dist(stopped,q)))
+        for landing in candidates[:FALLBACK_MAX_ROUTES]:
+            above=(landing[0],stopped[1],landing[2])
+            for route in ([above,landing],[landing]):
+                phases=list(brake);last=stopped
+                for i,q in enumerate(route):
+                    name='land' if i==len(route)-1 else 'cruise'
+                    phases.extend(_smooth_line(last,q,name,speed=5.5,accel=4.));last=q
+                if not phases:continue
+                plan=_make_plan(terrain,p,target or landing,phases,'air_follow_fallback_land',
+                                landing=landing,observation=observation)
+                if plan is None or callable(plan_check) and not plan_check(plan):continue
+                plan.update(airborne_start=True,start_velocity=v)
+                return plan
+    except (ValueError,TypeError,AttributeError):pass
+    return None

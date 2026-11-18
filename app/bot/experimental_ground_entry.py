@@ -340,14 +340,15 @@ class EngineeringObservations(ObservationStore):
 class ExperimentalGroundHook:
     """Per-instance seam: only explicit candidate entry installs this hook."""
     def _body_origin_offset(self, config):
-        """身体原点离脚底的高度按小光当前号的站姿算（身高不同差很多）；看不出就用配置值 0.5。"""
+        """Keep routes and worker proofs in the captured seed coordinate basis."""
         base = tuple(vec(config['originOffset']))
-        try:
+        profile = getattr(self.c, '_body_origin_profile', None)
+        if callable(profile):
+            y = profile().recorded
+        else:
             import social_pose
-            seed = getattr(self.c, 'seed', None) or getattr(self.c, 'raw_seed', None)
+            seed = getattr(self.c, 'raw_seed', None) or getattr(self.c, 'seed', None)
             y = social_pose.body_origin_offset(seed)
-        except Exception:
-            y = None
         if y is None or not -2 <= y <= 2:
             return base
         if abs(y - base[1]) > 1e-3:
@@ -361,6 +362,9 @@ class ExperimentalGroundHook:
                  backend_factory=BoundBackendFactory, session_deadline=None):
         self.c, self.clock, self.factory = c, clock, backend_factory
         self._config = validate_config(dict(config))
+        # The fallback is a session coordinate basis, not an outfit setting.
+        if callable(getattr(c, '_body_origin_profile', None)):
+            c._origin_fallback = float(self._config['originOffset'][1])
         self._config_generation, self._active_generation = 1, 0
         self._config_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='experimental-ground')
@@ -1338,8 +1342,11 @@ class ExperimentalGroundHook:
         return True
 
     def _revoke(self, reason):
-        if self.runtime is not None:
-            previous, self.runtime = self.runtime, None
+        previous, self.runtime = self.runtime, None
+        self._finish_revoke(previous, reason)
+
+    def _finish_revoke(self, previous, reason):
+        if previous is not None:
             previous.cancel()
             if previous._motion is not None:
                 self.c._terrain_failed(reason, expected=previous._motion)
@@ -1418,7 +1425,12 @@ class ExperimentalGroundHook:
                 co.hard_cancel(reason)
             if binding.coordinator is co:
                 binding.coordinator = None
-            self._revoke('experimental_' + reason)
+            # Detach under the dispatcher/publication lock, but never acquire
+            # runtime._lock through cancel/invalidate while holding it. Mark
+            # the old adapter unusable for concurrent continuous takeoff
+            # until _finish_revoke installs the closed gate.
+            runtime._detached_for_follow_rebind = True
+            self.runtime = None
             self._request_label, self._request_target = 'follow', None
             self._desired = self._desired_follow_peer = self._accepted_follow_peer = None
             self._follow_cold_streak = None
@@ -1426,10 +1438,11 @@ class ExperimentalGroundHook:
             self._next_follow_refresh = 0.
             self._cold_build_attempts, self._cold_build_next, self._cold_build_exhausted = 0, 0., False
             self.status = 'rebuilding_returned_follow_target'
-            c.log('experimental_follow_target_rebind',
-                reason='fresh_target_incarnation_changed' if same_uuid else 'fresh_explicit_target_changed',
-                same_uuid=same_uuid, old_physics_reused=False)
-            return True
+        self._finish_revoke(runtime, 'experimental_' + reason)
+        c.log('experimental_follow_target_rebind',
+            reason='fresh_target_incarnation_changed' if same_uuid else 'fresh_explicit_target_changed',
+            same_uuid=same_uuid, old_physics_reused=False)
+        return True
 
     def _rebind_seat_target(self):
         """T23-8：座位参照的人换了 slot/incarnation（或换了参照）就重建准入。
